@@ -28,6 +28,7 @@ class P2PTestClient {
       const socket = dgram.createSocket('udp4');
       const stunServer = this.config.stunServers[0];
       const [host, port] = stunServer.split(':');
+      let isResolved = false;
       
       // STUN Binding Request
       const transactionId = Buffer.from(Array(12).fill(0).map(() => Math.floor(Math.random() * 256)));
@@ -37,6 +38,17 @@ class P2PTestClient {
         Buffer.from([0x21, 0x12, 0xA4, 0x42]), // Magic Cookie
         transactionId
       ]);
+
+      const cleanup = () => {
+        if (!isResolved) {
+          isResolved = true;
+          try {
+            socket.close();
+          } catch (error) {
+            // Socket might already be closed, ignore error
+          }
+        }
+      };
 
       socket.on('message', (msg, rinfo) => {
         try {
@@ -63,7 +75,7 @@ class P2PTestClient {
                       ).join('.');
                     }
                     
-                    socket.close();
+                    cleanup();
                     resolve({ ip: publicIP, port: publicPort });
                     return;
                   }
@@ -73,22 +85,28 @@ class P2PTestClient {
             }
           }
         } catch (error) {
-          socket.close();
+          cleanup();
           reject(new Error(`STUN parsing error: ${error.message}`));
         }
       });
 
       socket.on('error', (error) => {
-        socket.close();
+        cleanup();
         reject(new Error(`STUN error: ${error.message}`));
       });
 
-      setTimeout(() => {
-        socket.close();
+      const timeout = setTimeout(() => {
+        cleanup();
         reject(new Error('STUN timeout'));
       }, 5000);
 
-      socket.send(stunRequest, parseInt(port), host);
+      socket.send(stunRequest, parseInt(port), host, (error) => {
+        if (error) {
+          clearTimeout(timeout);
+          cleanup();
+          reject(new Error(`STUN send error: ${error.message}`));
+        }
+      });
     });
   }
 
