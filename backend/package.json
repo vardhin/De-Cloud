@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "cors": "^2.8.5",
+    "dockerode": "^4.0.7",
     "express": "^5.1.0",
     "gun": "^0.2020.1240"
   }
