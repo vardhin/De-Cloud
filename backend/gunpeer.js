@@ -9,7 +9,7 @@ app.use(cors());
 
 // Create HTTP server
 const server = http.createServer(app);
-const port = process.env.PORT || 8765;
+const port = 8765;
 
 // Initialize Gun as a super peer (relay server)
 const gun = Gun({
@@ -43,6 +43,37 @@ app.get('/stats', (req, res) => {
     uptime: process.uptime(),
     memory: process.memoryUsage()
   });
+});
+
+// In-memory peer registry
+const peerRegistry = {};
+
+// Register endpoint for peers
+app.post('/register', express.json(), (req, res) => {
+  const { name, totalRam, availableRam, totalStorage, availableStorage, gpu } = req.body;
+  // Removed IP collection
+  if (!name) return res.status(400).json({ error: 'name required' });
+
+  peerRegistry[name] = {
+    name,
+    totalRam,
+    availableRam,
+    totalStorage,
+    availableStorage,
+    gpu,
+    lastSeen: Date.now()
+  };
+  res.json({ status: 'registered' });
+});
+
+// Endpoint to list all active peers and their resources
+app.get('/peers', (req, res) => {
+  // Only show peers seen in the last 2 minutes
+  const now = Date.now();
+  const activePeers = Object.values(peerRegistry).filter(
+    peer => now - peer.lastSeen < 2 * 60 * 1000
+  );
+  res.json({ peers: activePeers });
 });
 
 // Start the server

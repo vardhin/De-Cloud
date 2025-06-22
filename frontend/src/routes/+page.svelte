@@ -18,7 +18,23 @@
         data = data.replace(/[\x00-\x08\x0B-\x1A\x1C-\x1F\x7F]/g, '');
         return data;
     }
+    // Helper to format bytes as human-readable
+    function formatBytes(bytes) {
+        if (!bytes || isNaN(bytes)) return '-';
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        if (bytes === 0) return '0 B';
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + sizes[i];
+    }
 
+    // Helper to show "x seconds/minutes ago"
+    function formatTimeAgo(ts) {
+        if (!ts) return '-';
+        const diff = Math.floor((Date.now() - ts) / 1000);
+        if (diff < 60) return `${diff}s ago`;
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        return `${Math.floor(diff / 3600)}h ago`;
+    }
     function connectSocket() {
         connecting = true;
         import('socket.io-client').then(({ io }) => {
@@ -123,9 +139,147 @@
     afterUpdate(() => {
         if (outputDiv) outputDiv.scrollTop = outputDiv.scrollHeight;
     });
+
+    let health = {};
+    let peers = [];
+    let gunpeerStatus = '';
+    let superpeerStatus = '';
+    let superpeerConnected = false;
+    let superpeerUrl = '';
+
+    async function fetchHealth() {
+        try {
+            const res = await fetch('http://localhost:8766/health');
+            health = await res.json();
+            gunpeerStatus = health.status === 'healthy' ? 'Connected' : 'Not connected';
+            superpeerStatus = health.connectedTo
+                ? `Connected to superpeer: ${health.connectedTo}`
+                : 'Not connected to superpeer';
+        } catch (e) {
+            gunpeerStatus = 'Gunpeer client not reachable';
+            superpeerStatus = '';
+        }
+    }
+
+    async function fetchPeers() {
+        try {
+            const res = await fetch('http://localhost:8766/peers');
+            let text = await res.text();
+            // Remove any trailing '%' or invalid JSON characters
+            text = text.trim().replace(/%+$/, '');
+            const data = JSON.parse(text);
+            peers = Array.isArray(data.peers) ? data.peers : [];
+        } catch (e) {
+            peers = [];
+        }
+    }
+
+    async function fetchSuperpeerStatus() {
+        try {
+            const res = await fetch('http://localhost:8766/superpeer-status');
+            const data = await res.json();
+            superpeerConnected = data.connected;
+            superpeerUrl = data.superPeerUrl;
+        } catch (e) {
+            superpeerConnected = false;
+            superpeerUrl = '';
+        }
+    }
+
+    let peerName = '';
+    let maxResources = { ram: 0, storage: 0, gpu: '' };
+    let regResources = { ram: '', storage: '', gpu: '' };
+    let regStatus = '';
+    let isRegistered = false;
+
+    // Fetch max available resources from backend
+    async function fetchResources() {
+        try {
+            const res = await fetch('http://localhost:8766/resources');
+            maxResources = await res.json();
+            // Set defaults for registration fields
+            regResources.ram = maxResources.ram;
+            regResources.storage = maxResources.storage;
+            regResources.gpu = maxResources.gpu;
+        } catch {
+            maxResources = { ram: 0, storage: 0, gpu: '' };
+        }
+    }
+
+    async function registerPeer() {
+        regStatus = 'Registering...';
+        try {
+            const res = await fetch('http://localhost:8766/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: peerName,
+                    totalRam: regResources.ram,
+                    availableRam: regResources.ram,
+                    totalStorage: regResources.storage,
+                    availableStorage: regResources.storage,
+                    gpu: regResources.gpu
+                })
+            });
+            if (res.ok) {
+                regStatus = 'Registered successfully!';
+                isRegistered = true;
+            } else {
+                const data = await res.json();
+                regStatus = 'Failed: ' + (data.error || res.statusText);
+            }
+        } catch (e) {
+            regStatus = 'Failed: ' + e.message;
+        }
+    }
+
+    async function deregisterPeer() {
+        regStatus = 'Deregistering...';
+        try {
+            const res = await fetch('http://localhost:8766/deregister', { method: 'POST' });
+            if (res.ok) {
+                regStatus = 'Deregistered!';
+                isRegistered = false;
+            } else {
+                regStatus = 'Failed to deregister';
+            }
+        } catch (e) {
+            regStatus = 'Failed: ' + e.message;
+        }
+    }
+
+    onMount(() => {
+        fetchHealth();
+        fetchPeers();
+        fetchSuperpeerStatus();
+        fetchResources();
+        const superpeerInterval = setInterval(fetchSuperpeerStatus, 10000);
+        const peersInterval = setInterval(fetchPeers, 10000); // Add this line
+        return () => {
+            clearInterval(superpeerInterval);
+            clearInterval(peersInterval);
+        };
+    });
 </script>
 
 <h1>Docker Container Console</h1>
+
+<div class="connection-status">
+    <span class="gunpeer-status">
+        <strong>Gunpeer Client:</strong>
+        {gunpeerStatus}
+    </span>
+    <span class="superpeer-status">
+        <strong>Superpeer:</strong>
+        {superpeerConnected
+            ? `Connected`
+            : `Not connected`}
+        {#if superpeerUrl}
+            &nbsp;|&nbsp;
+            <a href={superpeerUrl.replace(/\/gun$/, '')} target="_blank" rel="noopener">{superpeerUrl.replace(/\/gun$/, '')}</a>
+        {/if}
+    </span>
+</div>
 
 <div class="controls">
     <button on:click={closeSession} disabled={!connected && !connecting}>Close</button>
@@ -179,6 +333,66 @@
 {#if showToast}
     <div class="toast">Copied!</div>
 {/if}
+
+<h2>Available Peers</h2>
+{#if peers.length === 0}
+    <p>No active peers found.</p>
+{:else}
+    <table class="peers-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <!-- <th>IP</th> --> <!-- IP column removed -->
+                <th>Total RAM</th>
+                <th>Available RAM</th>
+                <th>Total Storage</th>
+                <th>Available Storage</th>
+                <th>GPU</th>
+                <th>Last Seen</th>
+            </tr>
+        </thead>
+        <tbody>
+            {#each peers as peer}
+                <tr>
+                    <td>{peer.name}</td>
+                    <td>{formatBytes(peer.totalRam)}</td>
+                    <td>{formatBytes(peer.availableRam)}</td>
+                    <td>{formatBytes(peer.totalStorage)}</td>
+                    <td>{formatBytes(peer.availableStorage)}</td>
+                    <td>{peer.gpu}</td>
+                    <td>{formatTimeAgo(peer.lastSeen)}</td>
+                </tr>
+            {/each}
+        </tbody>
+    </table>
+{/if}
+
+<h2>Peer Registration</h2>
+<div class="peer-config">
+    <label>
+        Peer Name:
+        <input type="text" bind:value={peerName} placeholder="Enter peer name" />
+    </label>
+    <label>
+        Max RAM: <span>{formatBytes(maxResources.ram)}</span>
+        <input type="number" bind:value={regResources.ram} min="1" max={maxResources.ram} step="1" />
+    </label>
+    <label>
+        Max Storage: <span>{formatBytes(maxResources.storage)}</span>
+        <input type="number" bind:value={regResources.storage} min="1" max={maxResources.storage} step="1" />
+    </label>
+    <label>
+        GPU: <span>{maxResources.gpu}</span>
+        <input type="text" bind:value={regResources.gpu} />
+    </label>
+    <div class="peer-actions">
+        <button on:click={registerPeer} disabled={isRegistered || !peerName}>Register</button>
+        <button on:click={deregisterPeer} disabled={!isRegistered}>Deregister</button>
+    </div>
+    {#if regStatus}
+        <div class="reg-status">{regStatus}</div>
+    {/if}
+</div>
 
 <style>
 .console-container {
@@ -364,4 +578,76 @@ button:not(:disabled):hover {
 }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 @keyframes fadeout { from { opacity: 1; } to { opacity: 0; } }
+.peers-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 2em 0 1em 0;
+    background: #181818;
+    color: #e0e0e0;
+    font-size: 1em;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px #0003;
+}
+.peers-table th, .peers-table td {
+    border: 1px solid #222;
+    padding: 0.5em 1em;
+    text-align: left;
+}
+.peers-table th {
+    background: #222;
+    color: #00ff00;
+    font-weight: bold;
+}
+.peers-table tr:nth-child(even) {
+    background: #202020;
+}
+.peers-table tr:hover {
+    background: #222;
+}
+.connection-status {
+    margin: 1em 0 1.5em 0;
+    font-size: 1.08em;
+    display: flex;
+    gap: 2em;
+    align-items: center;
+}
+.gunpeer-status {
+    color: #00ff00;
+}
+.superpeer-status {
+    color: #00e0ff;
+}
+.peer-config {
+    background: #222;
+    color: #e0e0e0;
+    padding: 1em;
+    border-radius: 8px;
+    margin: 2em 0;
+    max-width: 500px;
+}
+.peer-config label {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 1em;
+    font-size: 1.05em;
+}
+.peer-config input[type="number"], .peer-config input[type="text"] {
+    margin-top: 0.3em;
+    padding: 0.3em;
+    border-radius: 4px;
+    border: 1px solid #444;
+    background: #181818;
+    color: #e0e0e0;
+}
+.peer-actions {
+    display: flex;
+    gap: 1em;
+    margin-top: 1em;
+}
+.reg-status {
+    margin-top: 1em;
+    color: #00ff00;
+    font-weight: bold;
+}
 </style>
