@@ -51,13 +51,17 @@
     }
 
     onMount(() => {
-        connectSocket();
-        window.addEventListener('keydown', globalShortcuts);
+        if (typeof window !== 'undefined') {
+            connectSocket();
+            window.addEventListener('keydown', globalShortcuts);
+        }
     });
 
     onDestroy(() => {
-        if (socket) socket.disconnect();
-        window.removeEventListener('keydown', globalShortcuts);
+        if (typeof window !== 'undefined') {
+            if (socket) socket.disconnect();
+            window.removeEventListener('keydown', globalShortcuts);
+        }
     });
 
     function sendInput() {
