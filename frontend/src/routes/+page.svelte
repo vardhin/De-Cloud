@@ -1,6 +1,7 @@
 <script>
     import { onMount, onDestroy, afterUpdate } from 'svelte';
     import AnsiToHtml from 'ansi-to-html';
+    import { v4 as uuidv4 } from 'uuid';
     let command = '';
     let output = '';
     let status = '';
@@ -35,26 +36,37 @@
         if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
         return `${Math.floor(diff / 3600)}h ago`;
     }
+    let sessionId = uuidv4();
+
     function connectSocket() {
         connecting = true;
         import('socket.io-client').then(({ io }) => {
-            socket = io('http://localhost:3000');
+            socket = io('http://localhost:8766'); // <-- changed from 3000 to 8766
             socket.on('connect', () => {
                 connected = true;
                 connecting = false;
                 status = 'Connected to container';
                 output = '';
                 focusInput();
+                // Start session with backend
+                socket.emit('start-session', { config: {}, sessionId });
             });
             socket.on('output', (data) => {
-                output += ansiConverter.toHtml(cleanTerminalOutput(data));
+                // If backend sends { sessionId, data }
+                if (typeof data === 'object' && data.sessionId && data.data && data.sessionId === sessionId) {
+                    output += ansiConverter.toHtml(cleanTerminalOutput(data.data));
+                } else if (typeof data === 'string') {
+                    output += ansiConverter.toHtml(cleanTerminalOutput(data));
+                }
             });
-            socket.on('end', () => {
-                status = 'Session ended';
-                connected = false;
+            socket.on('end', (data) => {
+                if (!data || data.sessionId === sessionId) {
+                    status = 'Session ended';
+                    connected = false;
+                }
             });
             socket.on('error', (err) => {
-                status = 'Error: ' + err;
+                status = 'Error: ' + (err.error || err);
                 connected = false;
                 connecting = false;
             });
@@ -65,13 +77,6 @@
             });
         });
     }
-
-    onMount(() => {
-        if (typeof window !== 'undefined') {
-            connectSocket();
-            window.addEventListener('keydown', globalShortcuts);
-        }
-    });
 
     onDestroy(() => {
         if (typeof window !== 'undefined') {
@@ -88,7 +93,7 @@
             return;
         }
         output += `<span class="user-cmd">$ ${command}</span>\n`;
-        socket.emit('input', command + '\n');
+        socket.emit('input', { sessionId, data: command + '\n' });
         command = '';
     }
 
@@ -187,24 +192,68 @@
     }
 
     let peerName = '';
-    let maxResources = { ram: 0, storage: 0, gpu: '' };
-    let regResources = { ram: '', storage: '', gpu: '' };
+    let maxResources = { ram: 0, storage: 0, gpu: '', cpuCores: 1, cpuThreads: 1 };
+    let regResources = { ram: '', availableRam: '', storage: '', availableStorage: '', gpu: '', cpuShares: '', nanoCpus: '' };
     let regStatus = '';
     let isRegistered = false;
+    let cpuSlider = 1;
 
     // Fetch max available resources from backend
     async function fetchResources() {
         try {
             const res = await fetch('http://localhost:8766/resources');
             maxResources = await res.json();
-            // Set defaults for registration fields
-            regResources.ram = maxResources.ram;
-            regResources.storage = maxResources.storage;
+            regResources.ram = maxResources.freeRam;
+            regResources.availableRam = maxResources.freeRam;
+            regResources.storage = maxResources.freeStorage;
+            regResources.availableStorage = maxResources.freeStorage;
             regResources.gpu = maxResources.gpu;
         } catch {
             maxResources = { ram: 0, storage: 0, gpu: '' };
         }
     }
+
+    // Fetch registration info from backend and fill form
+    async function fetchRegistration() {
+        try {
+            const res = await fetch('http://localhost:8766/registration');
+            const data = await res.json();
+            if (data && data.name) {
+                peerName = data.name;
+                regResources.ram = data.totalRam || '';
+                regResources.availableRam = data.availableRam || '';
+                regResources.storage = data.totalStorage || '';
+                regResources.availableStorage = data.availableStorage || '';
+                regResources.gpu = data.gpu || '';
+                regResources.cpuShares = data.cpuShares || '';
+                regResources.nanoCpus = data.nanoCpus || '';
+                isRegistered = !!data.registered;
+                regStatus = isRegistered ? 'Registered (loaded from DB)' : '';
+            } else {
+                isRegistered = false;
+                regStatus = '';
+            }
+        } catch {
+            isRegistered = false;
+            regStatus = '';
+        }
+    }
+
+    onMount(() => {
+        window.addEventListener('keydown', globalShortcuts);
+        fetchHealth();
+        fetchPeers();
+        fetchSuperpeerStatus();
+        fetchResources();
+        fetchRegistration();
+        const superpeerInterval = setInterval(fetchSuperpeerStatus, 10000);
+        const peersInterval = setInterval(fetchPeers, 10000);
+        return () => {
+            clearInterval(superpeerInterval);
+            clearInterval(peersInterval);
+            window.removeEventListener('keydown', globalShortcuts);
+        };
+    });
 
     async function registerPeer() {
         regStatus = 'Registering...';
@@ -215,15 +264,20 @@
                 body: JSON.stringify({
                     name: peerName,
                     totalRam: regResources.ram,
-                    availableRam: regResources.ram,
+                    availableRam: regResources.availableRam,
                     totalStorage: regResources.storage,
-                    availableStorage: regResources.storage,
-                    gpu: regResources.gpu
+                    availableStorage: regResources.availableStorage,
+                    gpu: regResources.gpu,
+                    cpuShares: regResources.cpuShares,
+                    nanoCpus: regResources.nanoCpus,
+                    cpuCores: maxResources.cpuCores,      // <-- ADD THIS
+                    cpuThreads: maxResources.cpuThreads   // <-- ADD THIS
                 })
             });
             if (res.ok) {
                 regStatus = 'Registered successfully!';
                 isRegistered = true;
+                fetchRegistration(); // Refresh from DB
             } else {
                 const data = await res.json();
                 regStatus = 'Failed: ' + (data.error || res.statusText);
@@ -240,6 +294,7 @@
             if (res.ok) {
                 regStatus = 'Deregistered!';
                 isRegistered = false;
+                fetchRegistration(); // Refresh from DB
             } else {
                 regStatus = 'Failed to deregister';
             }
@@ -248,18 +303,135 @@
         }
     }
 
-    onMount(() => {
-        fetchHealth();
-        fetchPeers();
-        fetchSuperpeerStatus();
-        fetchResources();
-        const superpeerInterval = setInterval(fetchSuperpeerStatus, 10000);
-        const peersInterval = setInterval(fetchPeers, 10000); // Add this line
-        return () => {
-            clearInterval(superpeerInterval);
-            clearInterval(peersInterval);
-        };
-    });
+    let recommendedCpuShares = 0;
+    let recommendedNanoCpus = 0;
+
+    $: recommendedCpuShares = cpuSlider * 1024;
+    $: recommendedNanoCpus = cpuSlider * 1_000_000_000;
+
+    let selectedPeer = null;
+    let resourceConfig = {
+        ram: 1024 * 1024 * 1024, // 1GB default
+        cpu: 1,
+        gpu: false
+    };
+    let connectStep = ''; // '', 'requesting', 'accepted', 'deploying', 'connected', 'error'
+    let connectError = ''; // <-- Add this at the top with other lets
+
+    async function startPeerConnection() {
+        if (!selectedPeer) return;
+        connectStep = 'requesting';
+        connectError = ''; // Clear previous error
+        try {
+            // Request container from the selected peer
+            const res = await fetch(`http://localhost:8766/connect/${selectedPeer}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ram: resourceConfig.ram * 1024 * 1024, // Convert MB to bytes
+                    cpu: resourceConfig.cpu,
+                    gpu: resourceConfig.gpu
+                })
+            });
+            if (!res.ok) throw new Error('Failed to connect to peer');
+            connectStep = 'accepted';
+            // Wait for the container to be ready
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            connectStep = 'deploying';
+            // Here you would typically deploy your application or run commands in the container
+            // For now, we just simulate it with a timeout
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            connectStep = 'connected';
+            connectSocket(); // <-- Add this line
+        } catch (e) {
+            connectStep = 'error';
+            connectError = e.message || 'Unknown error'; // <-- Set error message
+            console.error(e);
+        }
+    }
+
+    async function saveConfig() {
+        regStatus = 'Saving config...';
+        const res = await fetch('http://localhost:8766/save_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: peerName,
+                totalRam: regResources.ram,
+                availableRam: regResources.availableRam,
+                totalStorage: regResources.storage,
+                availableStorage: regResources.availableStorage,
+                gpu: regResources.gpu,
+                cpuShares: regResources.cpuShares,
+                nanoCpus: regResources.nanoCpus
+            })
+        });
+        if (res.ok) {
+            regStatus = 'Config saved locally!';
+            fetchRegistration();
+        } else {
+            regStatus = 'Failed to save config';
+        }
+    }
+
+    async function resetConfig() {
+        regStatus = 'Resetting config...';
+        const res = await fetch('http://localhost:8766/reset_config', { method: 'POST' });
+        if (res.ok) {
+            const data = await res.json();
+            // Update form with returned config
+            if (data.config) {
+                regResources.ram = data.config.totalRam || '';
+                regResources.availableRam = data.config.availableRam || '';
+                regResources.storage = data.config.totalStorage || '';
+                regResources.availableStorage = data.config.availableStorage || '';
+                regResources.gpu = data.config.gpu || '';
+                regResources.cpuShares = data.config.cpuShares || '';
+                regResources.nanoCpus = data.config.nanoCpus || '';
+                peerName = data.config.name || '';
+            }
+            regStatus = 'Config reset!';
+        } else {
+            regStatus = 'Failed to reset config';
+        }
+    }
+
+    async function registerToSuperpeer() {
+        regStatus = 'Registering to superpeer...';
+        const res = await fetch('http://localhost:8766/register_superpeer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: peerName,
+                totalRam: regResources.ram,
+                availableRam: regResources.availableRam,
+                totalStorage: regResources.storage,
+                availableStorage: regResources.availableStorage,
+                gpu: regResources.gpu,
+                cpuShares: regResources.cpuShares,
+                nanoCpus: regResources.nanoCpus,
+                cpuCores: maxResources.cpuCores,      // <-- ADD THIS
+                cpuThreads: maxResources.cpuThreads   // <-- ADD THIS
+            })
+        });
+        if (res.ok) {
+            regStatus = 'Registered to superpeer!';
+            fetchRegistration();
+        } else {
+            regStatus = 'Failed to register to superpeer';
+        }
+    }
+
+    async function deregisterFromSuperpeer() {
+        regStatus = 'Deregistering from superpeer...';
+        const res = await fetch('http://localhost:8766/deregister_superpeer', { method: 'POST' });
+        if (res.ok) {
+            regStatus = 'Deregistered from superpeer!';
+            fetchRegistration();
+        } else {
+            regStatus = 'Failed to deregister from superpeer';
+        }
+    }
 </script>
 
 <h1>Docker Container Console</h1>
@@ -287,42 +459,45 @@
     <button on:click={copyOutput} title="Copy output" aria-label="Copy output">📋</button>
 </div>
 
-<div class="console-container">
-    <div
-        class="console-output"
-        bind:this={outputDiv}
-        tabindex="0"
-        spellcheck="false"
-        aria-label="Terminal output"
-        aria-live="polite"
-        style="white-space: pre-wrap; overflow-y: auto; min-height: 20em; max-height: 30em;"
-    >
-        {#if connecting}
-            <div class="spinner"></div>
-            <span class="connecting-msg">Connecting...</span>
-        {:else}
-            {@html output}
-        {/if}
-    </div>
-    <div class="console-input-line">
-        <span class="prompt">$</span>
-        <input
-            class="console-input"
-            type="text"
-            bind:value={command}
-            placeholder={connected ? "Type command and press Enter (Ctrl+K to focus)" : "Connect to start"}
-            on:keydown={handleKeydown}
-            on:focus={e => e.target.select()}
-            autocomplete="off"
+{#if connectStep === 'connected'}
+    <!-- Console UI here -->
+    <div class="console-container">
+        <div
+            class="console-output"
+            bind:this={outputDiv}
+            tabindex="0"
             spellcheck="false"
-            disabled={!connected}
-            bind:this={inputEl}
-        />
-        <button on:click={sendInput} disabled={!connected || connecting}>
-            {connecting ? '...' : 'Run'}
-        </button>
+            aria-label="Terminal output"
+            aria-live="polite"
+            style="white-space: pre-wrap; overflow-y: auto; min-height: 20em; max-height: 30em;"
+        >
+            {#if connecting}
+                <div class="spinner"></div>
+                <span class="connecting-msg">Connecting...</span>
+            {:else}
+                {@html output}
+            {/if}
+        </div>
+        <div class="console-input-line">
+            <span class="prompt">$</span>
+            <input
+                class="console-input"
+                type="text"
+                bind:value={command}
+                placeholder={connected ? "Type command and press Enter (Ctrl+K to focus)" : "Connect to start"}
+                on:keydown={handleKeydown}
+                on:focus={e => e.target.select()}
+                autocomplete="off"
+                spellcheck="false"
+                disabled={!connected}
+                bind:this={inputEl}
+            />
+            <button on:click={sendInput} disabled={!connected || connecting}>
+                {connecting ? '...' : 'Run'}
+            </button>
+        </div>
     </div>
-</div>
+{/if}
 
 {#if status}
     <p class="status {connected ? 'ok' : connecting ? 'pending' : 'fail'}">
@@ -342,7 +517,6 @@
         <thead>
             <tr>
                 <th>Name</th>
-                <!-- <th>IP</th> --> <!-- IP column removed -->
                 <th>Total RAM</th>
                 <th>Available RAM</th>
                 <th>Total Storage</th>
@@ -374,24 +548,181 @@
         <input type="text" bind:value={peerName} placeholder="Enter peer name" />
     </label>
     <label>
-        Max RAM: <span>{formatBytes(maxResources.ram)}</span>
-        <input type="number" bind:value={regResources.ram} min="1" max={maxResources.ram} step="1" />
+        Max RAM: <span>{formatBytes(regResources.ram)}</span>
+        <input
+            type="range"
+            min={1024 * 1024 * 256}
+            max={maxResources.freeRam}
+            step={1024 * 1024 * 256}
+            bind:value={regResources.ram}
+            on:input={() => {
+                if (regResources.availableRam > regResources.ram) {
+                    regResources.availableRam = regResources.ram;
+                }
+            }}
+        />
+        <span>{(regResources.ram / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
     </label>
     <label>
-        Max Storage: <span>{formatBytes(maxResources.storage)}</span>
-        <input type="number" bind:value={regResources.storage} min="1" max={maxResources.storage} step="1" />
+        Available RAM:
+        <input
+            type="range"
+            min={1024 * 1024 * 256}
+            max={regResources.ram}
+            step={1024 * 1024 * 256}
+            bind:value={regResources.availableRam}
+        />
+        <span>{(regResources.availableRam / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
+    </label>
+    <label>
+        Max Storage: <span>{formatBytes(regResources.storage)}</span>
+        <input
+            type="range"
+            min={1024 * 1024 * 256}
+            max={maxResources.freeStorage}
+            step={1024 * 1024 * 256}
+            bind:value={regResources.storage}
+            on:input={() => {
+                // If availableStorage > storage, clamp it
+                if (regResources.availableStorage > regResources.storage) {
+                    regResources.availableStorage = regResources.storage;
+                }
+            }}
+        />
+        <span>{(regResources.storage / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
+    </label>
+    <label>
+        Available Storage:
+        <input
+            type="range"
+            min={1024 * 1024 * 256}
+            max={regResources.storage}
+            step={1024 * 1024 * 256}
+            bind:value={regResources.availableStorage}
+        />
+        <span>{(regResources.availableStorage / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
     </label>
     <label>
         GPU: <span>{maxResources.gpu}</span>
         <input type="text" bind:value={regResources.gpu} />
     </label>
+    <label>
+        CPU Shares:
+        <input
+            type="range"
+            min="2"
+            max="1024"
+            step="2"
+            bind:value={regResources.cpuShares}
+        />
+        <span>{regResources.cpuShares}</span>
+        <button type="button" on:click={() => regResources.cpuShares = recommendedCpuShares}>
+            Set recommended ({recommendedCpuShares})
+        </button>
+        <div class="cpu-help">
+            <small>
+                <b>What is a CPU Share?</b> Docker uses CPU shares to proportionally allocate CPU time between containers. Default is 1024 per core.<br>
+            </small>
+        </div>
+    </label>
+    <label>
+        NanoCPUs:
+        <input
+            type="range"
+            min="0"
+            max={maxResources.cpuCores * 1_000_000_000}
+            step="250000000"
+            bind:value={regResources.nanoCpus}
+        />
+        <span>{(regResources.nanoCpus / 1_000_000_000).toFixed(2)} CPU(s)</span>
+        <button type="button" on:click={() => regResources.nanoCpus = recommendedNanoCpus}>
+            Set recommended ({(recommendedNanoCpus / 1_000_000_000).toFixed(2)} CPU)
+        </button>
+        <div class="cpu-help">
+            <small>
+                <b>What is a NanoCPU?</b> 1 NanoCPU = 1 billionth of a CPU core. 2 CPUs = 2,000,000,000 NanoCPUs. This is a fine-grained way to limit CPU usage.
+            </small>
+        </div>
+    </label>
+    <label>
+        CPU Cores: <span>{cpuSlider} / {maxResources.cpuCores}</span>
+        <input
+            type="range"
+            min="1"
+            max={maxResources.cpuCores}
+            step="1"
+            bind:value={cpuSlider}
+            on:input={() => {
+                regResources.cpuShares = recommendedCpuShares;
+                regResources.nanoCpus = recommendedNanoCpus;
+            }}
+        />
+        <span>{cpuSlider} core(s) selected</span>
+        <div class="cpu-help">
+            <small>
+                <b>What is a CPU core?</b> Each core can run one task at a time.<br>
+                <b>CPU Shares</b> are Docker's way to share CPU between containers.<br>
+                <b>NanoCPUs</b> is a fine-grained way to limit CPU (1 core = 1,000,000,000 NanoCPUs).
+            </small>
+        </div>
+    </label>
     <div class="peer-actions">
-        <button on:click={registerPeer} disabled={isRegistered || !peerName}>Register</button>
-        <button on:click={deregisterPeer} disabled={!isRegistered}>Deregister</button>
+        <button on:click={saveConfig}>Save Config</button>
+        <button on:click={resetConfig}>Reset Config</button>
+        <button on:click={registerToSuperpeer} disabled={!peerName}>Register to Superpeer</button>
+        <button on:click={deregisterFromSuperpeer} disabled={!isRegistered}>Deregister from Superpeer</button>
     </div>
     {#if regStatus}
         <div class="reg-status">{regStatus}</div>
     {/if}
+</div>
+
+<h2>Connect to Peer</h2>
+<div>
+    <label>
+        Select Peer:
+        <select bind:value={selectedPeer}>
+            <option value="">-- Select --</option>
+            {#each peers as peer}
+                <option value={peer.name}>{peer.name}</option>
+            {/each}
+        </select>
+    </label>
+    <label>
+        RAM (MB):
+        <input type="number" min="256" step="256" bind:value={resourceConfig.ram} />
+    </label>
+    <label>
+        CPU Cores:
+        <input type="number" min="1" max="16" bind:value={resourceConfig.cpu} />
+    </label>
+    <label>
+        GPU:
+        <input type="checkbox" bind:checked={resourceConfig.gpu} />
+    </label>
+    <button on:click={startPeerConnection} disabled={!selectedPeer || connectStep === 'requesting'}>
+        Connect
+    </button>
+    {#if connectStep}
+        <div>
+            {#if connectStep === 'requesting'}Requesting container from {selectedPeer}...{/if}
+            {#if connectStep === 'accepted'}Peer accepted, deploying container...{/if}
+            {#if connectStep === 'deploying'}Container deploying...{/if}
+            {#if connectStep === 'connected'}Connected! Console ready.{/if}
+            {#if connectStep === 'error'}<span style="color:red">{connectError}</span>{/if}
+        </div>
+    {/if}
+</div>
+
+<div class="summary">
+    <b>Your System:</b>
+    <ul>
+        <li>Total RAM: {formatBytes(maxResources.ram)}</li>
+        <li>Free RAM: {formatBytes(maxResources.freeRam)}</li>
+        <li>Total Storage: {formatBytes(maxResources.storage)}</li>
+        <li>Free Storage: {formatBytes(maxResources.freeStorage)}</li>
+        <li>CPU: {maxResources.cpuCores} cores / {maxResources.cpuThreads} threads</li>
+    </ul>
 </div>
 
 <style>

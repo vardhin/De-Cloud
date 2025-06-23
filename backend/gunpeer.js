@@ -2,6 +2,7 @@ const Gun = require('gun');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const { Server } = require('socket.io');
 
 // Create Express app
 const app = express();
@@ -11,18 +12,45 @@ app.use(cors());
 const server = http.createServer(app);
 const port = 8765;
 
+// Initialize Socket.IO
+const io = new Server(server, { cors: { origin: '*' } });
+
+// Map: peerName -> socket
+const peerSockets = {};
+
+// Handle peer connections
+io.on('connection', (socket) => {
+  let peerName = null;
+
+  socket.on('register', ({ name }) => {
+    peerName = name;
+    peerSockets[peerName] = socket;
+    console.log(`Peer registered: ${peerName}`);
+  });
+
+  // Tunnel message relay
+  socket.on('tunnel', (msg) => {
+    const { target } = msg;
+    if (target && peerSockets[target]) {
+      peerSockets[target].emit('tunnel', { ...msg, from: peerName });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    if (peerName && peerSockets[peerName]) {
+      delete peerSockets[peerName];
+      console.log(`Peer disconnected: ${peerName}`);
+    }
+  });
+});
+
 // Initialize Gun as a super peer (relay server)
 const gun = Gun({
   web: server,
-  // Don't connect to any external peers - this peer IS the relay
   peers: [],
-  // Enable as super peer
   super: true,
-  // Store data in memory (you can configure file storage if needed)
   file: 'data',
-  // Enable radisk for better performance
   radisk: true,
-  // Allow CORS for web clients
   cors: true
 });
 
@@ -45,35 +73,64 @@ app.get('/stats', (req, res) => {
   });
 });
 
-// In-memory peer registry
-const peerRegistry = {};
+const PEER_DB_KEY = 'superpeer/peers';
 
 // Register endpoint for peers
-app.post('/register', express.json(), (req, res) => {
-  const { name, totalRam, availableRam, totalStorage, availableStorage, gpu } = req.body;
-  // Removed IP collection
+app.post('/register', express.json(), async (req, res) => {
+  const {
+    name,
+    totalRam = 0,
+    availableRam = 0,
+    totalStorage = 0,
+    availableStorage = 0,
+    gpu = 'none',
+    cpuCores = 0,
+    cpuThreads = 0,
+    deregister
+  } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
 
-  peerRegistry[name] = {
+  const peerData = {
     name,
     totalRam,
     availableRam,
     totalStorage,
     availableStorage,
     gpu,
+    cpuCores,
+    cpuThreads,
     lastSeen: Date.now()
   };
-  res.json({ status: 'registered' });
+
+  if (deregister) {
+    gun.get(PEER_DB_KEY).get(name).put(null, () => {
+      res.json({ status: 'deregistered' });
+    });
+    return;
+  }
+
+  gun.get(PEER_DB_KEY).get(name).put(peerData, () => {
+    res.json({ status: 'registered' });
+  });
 });
 
 // Endpoint to list all active peers and their resources
 app.get('/peers', (req, res) => {
-  // Only show peers seen in the last 2 minutes
   const now = Date.now();
-  const activePeers = Object.values(peerRegistry).filter(
-    peer => now - peer.lastSeen < 2 * 60 * 1000
-  );
-  res.json({ peers: activePeers });
+  const peers = [];
+  gun.get(PEER_DB_KEY).map().once((peer, key) => {
+    if (peer && peer.lastSeen && now - peer.lastSeen < 2 * 60 * 1000) {
+      peers.push({
+        ...peer,
+        cpuCores: peer.cpuCores,
+        cpuThreads: peer.cpuThreads
+      });
+    }
+  });
+  // Wait a short time to collect all peers, then respond
+  setTimeout(() => {
+    res.json({ peers });
+  }, 300); // 300ms is usually enough for Gun to finish
 });
 
 // Start the server

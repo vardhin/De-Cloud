@@ -16,6 +16,7 @@
     "express": "^5.1.0",
     "gun": "^0.2020.1240",
     "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
     "systeminformation": "^5.27.6"
   }
 }
