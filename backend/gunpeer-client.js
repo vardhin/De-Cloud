@@ -405,7 +405,9 @@ function connectSuperpeerSocket() {
       console.warn('Connected to superpeer socket, but peer is not registered. Please register to superpeer first.');
       return;
     }
-    console.log('Socket.IO connection to superpeer established');
+    // Register this socket with the superpeer
+    superpeerSocket.emit('register', { name: peerConfig.name });
+    console.log('Socket.IO connection to superpeer established and registered as', peerConfig.name);
   });
 
   superpeerSocket.on('connect_error', (err) => {
@@ -418,6 +420,7 @@ function connectSuperpeerSocket() {
 
   // Move this handler INSIDE the function
   superpeerSocket.on('tunnel', async (data) => {
+    console.log('[TUNNEL] Received tunnel message:', data); // <-- Add this line
     try {
       const { from, payload, sessionId, containerId } = data;
 
@@ -519,7 +522,6 @@ app.post('/docker/tunnel/connect', (req, res) => {
 
 // Connect to another peer via superpeer (request_container)
 app.post('/connect/:peer', express.json(), async (req, res) => {
-    // Check if this peer is registered
     if (!peerConfig.registered) {
         return res.status(400).json({ error: 'Peer is not registered. Please register to superpeer first.' });
     }
@@ -528,41 +530,54 @@ app.post('/connect/:peer', express.json(), async (req, res) => {
     const { ram, cpu, gpu } = req.body;
     const socket = connectSuperpeerSocket();
 
-    // Listen for response
-    function onTunnelResponse(data) {
-        if (
-            data.payload &&
-            data.payload.action === 'request_container_result' &&
-            data.payload.userId === targetPeer
-        ) {
-            socket.off('tunnel', onTunnelResponse);
-            if (data.payload.error) {
-                res.status(500).json({ error: data.payload.error });
-            } else {
-                res.json({
-                    containerId: data.payload.containerId,
-                    secretKey: data.payload.secretKey,
-                    userId: data.payload.userId
-                });
+    function sendTunnelRequest() {
+        let responded = false;
+        // Listen for response
+        function onTunnelResponse(data) {
+            if (
+                data.payload &&
+                data.payload.action === 'request_container_result' &&
+                data.payload.userId === targetPeer
+            ) {
+                socket.off('tunnel', onTunnelResponse);
+                clearTimeout(timeout); // <-- Clear the timeout!
+                responded = true;
+                if (data.payload.error) {
+                    res.status(500).json({ error: data.payload.error });
+                } else {
+                    res.json({
+                        containerId: data.payload.containerId,
+                        secretKey: data.payload.secretKey,
+                        userId: data.payload.userId
+                    });
+                }
             }
         }
+        socket.on('tunnel', onTunnelResponse);
+
+        // Send tunnel request to target peer via superpeer
+        socket.emit('tunnel', {
+            target: targetPeer,
+            payload: {
+                action: 'request_container',
+                resources: { ram, cpu, gpu }
+            }
+        });
+
+        // Timeout in 15s
+        const timeout = setTimeout(() => {
+            socket.off('tunnel', onTunnelResponse);
+            if (!responded) {
+                res.status(504).json({ error: 'Timeout waiting for peer response' });
+            }
+        }, 15000);
     }
-    socket.on('tunnel', onTunnelResponse);
 
-    // Send tunnel request to target peer via superpeer
-    socket.emit('tunnel', {
-        target: targetPeer,
-        payload: {
-            action: 'request_container',
-            resources: { ram, cpu, gpu }
-        }
-    });
-
-    // Timeout in 15s
-    setTimeout(() => {
-        socket.off('tunnel', onTunnelResponse);
-        res.status(504).json({ error: 'Timeout waiting for peer response' });
-    }, 15000);
+    if (socket.connected) {
+        sendTunnelRequest();
+    } else {
+        socket.once('connect', sendTunnelRequest);
+    }
 });
 
 // Periodically update registration to keep peer alive in superpeer list

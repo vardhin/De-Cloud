@@ -32,7 +32,10 @@ io.on('connection', (socket) => {
   socket.on('tunnel', (msg) => {
     const { target } = msg;
     if (target && peerSockets[target]) {
+      console.log(`Relaying tunnel message from ${peerName} to ${target}`);
       peerSockets[target].emit('tunnel', { ...msg, from: peerName });
+    } else {
+      console.log(`Tunnel target ${target} not found`);
     }
   });
 
