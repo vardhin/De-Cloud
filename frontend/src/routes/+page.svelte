@@ -2,6 +2,7 @@
     import { onMount, onDestroy, afterUpdate } from 'svelte';
     import AnsiToHtml from 'ansi-to-html';
     import { v4 as uuidv4 } from 'uuid';
+    import "./../style.css"
     
     // Import Lucide icons
     import { 
@@ -27,7 +28,11 @@
         Zap,
         Clock,
         Check,
-        X
+        X,
+        Database,
+        Plus,
+        Edit,
+        Trash
     } from 'lucide-svelte';
     
     let command = '';
@@ -42,6 +47,63 @@
     
     // Add the missing activeTab variable
     let activeTab = 'console';
+
+    // Database schema management variables
+    let schemas = [];
+    let currentSchema = null;
+    let newSchemaName = '';
+    let newTableName = '';
+    let newColumnName = '';
+    let newColumnType = '';
+    let newColumnLength = '';
+    let schemaStatus = '';
+    let editingSchema = null;
+    let editingTable = null;
+    let editingColumn = null;
+
+    // MySQL column types
+    const mysqlTypes = [
+        // Numeric types
+        { value: 'INT', label: 'INT', hasLength: true, defaultLength: '11' },
+        { value: 'TINYINT', label: 'TINYINT', hasLength: true, defaultLength: '4' },
+        { value: 'SMALLINT', label: 'SMALLINT', hasLength: true, defaultLength: '6' },
+        { value: 'MEDIUMINT', label: 'MEDIUMINT', hasLength: true, defaultLength: '9' },
+        { value: 'BIGINT', label: 'BIGINT', hasLength: true, defaultLength: '20' },
+        { value: 'DECIMAL', label: 'DECIMAL', hasLength: true, defaultLength: '10,2' },
+        { value: 'FLOAT', label: 'FLOAT', hasLength: true, defaultLength: '7,4' },
+        { value: 'DOUBLE', label: 'DOUBLE', hasLength: true, defaultLength: '15,8' },
+        { value: 'BIT', label: 'BIT', hasLength: true, defaultLength: '1' },
+        
+        // String types
+        { value: 'VARCHAR', label: 'VARCHAR', hasLength: true, defaultLength: '255' },
+        { value: 'CHAR', label: 'CHAR', hasLength: true, defaultLength: '1' },
+        { value: 'TEXT', label: 'TEXT', hasLength: false },
+        { value: 'TINYTEXT', label: 'TINYTEXT', hasLength: false },
+        { value: 'MEDIUMTEXT', label: 'MEDIUMTEXT', hasLength: false },
+        { value: 'LONGTEXT', label: 'LONGTEXT', hasLength: false },
+        { value: 'BINARY', label: 'BINARY', hasLength: true, defaultLength: '1' },
+        { value: 'VARBINARY', label: 'VARBINARY', hasLength: true, defaultLength: '255' },
+        { value: 'BLOB', label: 'BLOB', hasLength: false },
+        { value: 'TINYBLOB', label: 'TINYBLOB', hasLength: false },
+        { value: 'MEDIUMBLOB', label: 'MEDIUMBLOB', hasLength: false },
+        { value: 'LONGBLOB', label: 'LONGBLOB', hasLength: false },
+        
+        // Date and time types
+        { value: 'DATE', label: 'DATE', hasLength: false },
+        { value: 'TIME', label: 'TIME', hasLength: false },
+        { value: 'DATETIME', label: 'DATETIME', hasLength: false },
+        { value: 'TIMESTAMP', label: 'TIMESTAMP', hasLength: false },
+        { value: 'YEAR', label: 'YEAR', hasLength: false },
+        
+        // Other types
+        { value: 'ENUM', label: 'ENUM', hasLength: true, defaultLength: "'value1','value2'" },
+        { value: 'SET', label: 'SET', hasLength: true, defaultLength: "'value1','value2'" },
+        { value: 'JSON', label: 'JSON', hasLength: false },
+        { value: 'GEOMETRY', label: 'GEOMETRY', hasLength: false },
+        { value: 'POINT', label: 'POINT', hasLength: false },
+        { value: 'LINESTRING', label: 'LINESTRING', hasLength: false },
+        { value: 'POLYGON', label: 'POLYGON', hasLength: false }
+    ];
 
     const ansiConverter = new AnsiToHtml({ fg: '#e0e0e0', bg: '#181818' });
 
@@ -300,6 +362,7 @@
         fetchSuperpeerStatus();
         fetchResources();
         fetchRegistration();
+        loadSchemas(); // Load schemas on mount
         const superpeerInterval = setInterval(fetchSuperpeerStatus, 10000);
         const peersInterval = setInterval(fetchPeers, 10000);
         return () => {
@@ -582,6 +645,252 @@
             console.error('Failed to reach superpeer:', e);
         }
     }
+
+    // Database Schema Management Functions
+    async function createSchema() {
+        if (!newSchemaName.trim()) {
+            schemaStatus = 'Schema name is required';
+            return;
+        }
+        
+        // Check if schema already exists
+        if (schemas.find(s => s.name === newSchemaName)) {
+            schemaStatus = 'Schema already exists';
+            return;
+        }
+        
+        const newSchema = {
+            id: uuidv4(),
+            name: newSchemaName,
+            tables: [],
+            createdAt: new Date().toISOString()
+        };
+        
+        schemas = [...schemas, newSchema];
+        newSchemaName = '';
+        schemaStatus = `Schema "${newSchema.name}" created successfully`;
+        await saveSchemas();
+    }
+
+    async function deleteSchema(schemaId) {
+        const schema = schemas.find(s => s.id === schemaId);
+        const schemaName = schema?.name;
+        schemas = schemas.filter(s => s.id !== schemaId);
+        if (currentSchema && currentSchema.id === schemaId) {
+            currentSchema = null;
+        }
+        schemaStatus = `Schema "${schemaName}" deleted successfully`;
+        await saveSchemas();
+    }
+
+    async function addTable(schemaId) {
+        if (!newTableName.trim()) {
+            schemaStatus = 'Table name is required';
+            return;
+        }
+        
+        const schema = schemas.find(s => s.id === schemaId);
+        if (!schema) return;
+        
+        // Check if table already exists in this schema
+        if (schema.tables.find(t => t.name === newTableName)) {
+            schemaStatus = 'Table already exists in this schema';
+            return;
+        }
+        
+        const newTable = {
+            id: uuidv4(),
+            name: newTableName,
+            columns: [],
+            createdAt: new Date().toISOString()
+        };
+        
+        schema.tables.push(newTable);
+        schemas = [...schemas];
+        newTableName = '';
+        schemaStatus = `Table "${newTable.name}" added successfully`;
+        await saveSchemas();
+    }
+
+    async function deleteTable(schemaId, tableId) {
+        const schema = schemas.find(s => s.id === schemaId);
+        if (!schema) return;
+        
+        const table = schema.tables.find(t => t.id === tableId);
+        const tableName = table?.name;
+        schema.tables = schema.tables.filter(t => t.id !== tableId);
+        schemas = [...schemas];
+        schemaStatus = `Table "${tableName}" deleted successfully`;
+        await saveSchemas();
+    }
+
+    async function addColumn(schemaId, tableId) {
+        if (!newColumnName.trim() || !newColumnType.trim()) {
+            schemaStatus = 'Column name and type are required';
+            return;
+        }
+        
+        const schema = schemas.find(s => s.id === schemaId);
+        if (!schema) return;
+        
+        const table = schema.tables.find(t => t.id === tableId);
+        if (!table) return;
+        
+        // Check if column already exists in this table
+        if (table.columns.find(c => c.name === newColumnName)) {
+            schemaStatus = 'Column already exists in this table';
+            return;
+        }
+        
+        const selectedType = mysqlTypes.find(t => t.value === newColumnType);
+        const newColumn = {
+            id: uuidv4(),
+            name: newColumnName,
+            type: newColumnType,
+            length: selectedType?.hasLength ? (newColumnLength || selectedType.defaultLength) : null,
+            createdAt: new Date().toISOString()
+        };
+        
+        table.columns.push(newColumn);
+        schemas = [...schemas];
+        newColumnName = '';
+        newColumnType = '';
+        newColumnLength = '';
+        schemaStatus = `Column "${newColumn.name}" added successfully`;
+        await saveSchemas();
+    }
+
+    async function deleteColumn(schemaId, tableId, columnId) {
+        const schema = schemas.find(s => s.id === schemaId);
+        if (!schema) return;
+        
+        const table = schema.tables.find(t => t.id === tableId);
+        if (!table) return;
+        
+        const column = table.columns.find(c => c.id === columnId);
+        const columnName = column?.name;
+        table.columns = table.columns.filter(c => c.id !== columnId);
+        schemas = [...schemas];
+        schemaStatus = `Column "${columnName}" deleted successfully`;
+        await saveSchemas();
+    }
+
+    // Update the selected column type to set default length
+    $: {
+        if (newColumnType) {
+            const selectedType = mysqlTypes.find(t => t.value === newColumnType);
+            if (selectedType?.hasLength && !newColumnLength) {
+                newColumnLength = selectedType.defaultLength;
+            }
+        }
+    }
+
+    // Generate SQL CREATE TABLE statement
+    function generateCreateTableSQL(schema, table) {
+        if (!table.columns.length) return '';
+        
+        let sql = `CREATE TABLE \`${schema.name}\`.\`${table.name}\` (\n`;
+        
+        const columnDefinitions = table.columns.map(column => {
+            let def = `  \`${column.name}\` ${column.type}`;
+            if (column.length) {
+                def += `(${column.length})`;
+            }
+            return def;
+        });
+        
+        sql += columnDefinitions.join(',\n');
+        sql += '\n);';
+        
+        return sql;
+    }
+
+    async function saveSchemas() {
+        try {
+            localStorage.setItem('db-schemas', JSON.stringify(schemas));
+        } catch (e) {
+            console.error('Failed to save schemas:', e);
+            schemaStatus = 'Failed to save schemas';
+        }
+    }
+
+    async function loadSchemas() {
+        try {
+            const saved = localStorage.getItem('db-schemas');
+            if (saved) {
+                const loadedSchemas = JSON.parse(saved);
+                // Ensure each schema has a tables array
+                schemas = loadedSchemas.map(schema => ({
+                    ...schema,
+                    tables: schema.tables || []
+                }));
+            }
+        } catch (e) {
+            console.error('Failed to load schemas:', e);
+            schemas = [];
+        }
+    }
+
+    function exportSchema(schema) {
+        const dataStr = JSON.stringify(schema, null, 2);
+        const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+        
+        const exportFileDefaultName = `schema-${schema.name}.json`;
+        
+        const linkElement = document.createElement('a');
+        linkElement.setAttribute('href', dataUri);
+        linkElement.setAttribute('download', exportFileDefaultName);
+        linkElement.click();
+        
+        schemaStatus = `Schema "${schema.name}" exported successfully`;
+    }
+
+    function importSchema(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const importedSchema = JSON.parse(e.target.result);
+                // Generate new ID to avoid conflicts and ensure tables array exists
+                const schemaToImport = {
+                    ...importedSchema,
+                    id: uuidv4(),
+                    name: importedSchema.name + ' (imported)',
+                    tables: importedSchema.tables || []
+                };
+                
+                schemas = [...schemas, schemaToImport];
+                schemaStatus = `Schema "${schemaToImport.name}" imported successfully`;
+                saveSchemas();
+            } catch (error) {
+                schemaStatus = 'Failed to import schema: Invalid JSON file';
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    // ...existing onMount and other functions...
+
+    onMount(() => {
+        window.addEventListener('keydown', globalShortcuts);
+        fetchHealth();
+        fetchPeers();
+        fetchSuperpeerStatus();
+        fetchResources();
+        fetchRegistration();
+        loadSchemas(); // Load schemas on mount
+        const superpeerInterval = setInterval(fetchSuperpeerStatus, 10000);
+        const peersInterval = setInterval(fetchPeers, 10000);
+        return () => {
+            clearInterval(superpeerInterval);
+            clearInterval(peersInterval);
+            window.removeEventListener('keydown', globalShortcuts);
+        };
+    });
+
+    // ...rest of existing code...
 </script>
 
 <div class="app-container">
@@ -623,6 +932,12 @@
             on:click={() => activeTab = 'connect'}
         >
             <Link size="16" /> Connect
+        </button>
+        <button 
+            class="tab-button {activeTab === 'schemas' ? 'active' : ''}"
+            on:click={() => activeTab = 'schemas'}
+        >
+            <Database size="16" /> Schemas
         </button>
     </nav>
 
@@ -936,6 +1251,190 @@
                 </div>
             </div>
         {/if}
+
+        {#if activeTab === 'schemas'}
+            <div class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Database Schemas</h2>
+                        <div class="card-actions">
+                            <input
+                                type="file"
+                                accept=".json"
+                                on:change={importSchema}
+                                style="display: none;"
+                                id="import-schema"
+                            />
+                            <button class="btn btn-secondary" on:click={() => document.getElementById('import-schema').click()}>
+                                Import Schema
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="schema-creator">
+                        <h3>Create New Schema</h3>
+                        <div class="form-group">
+                            <input
+                                class="form-input"
+                                type="text"
+                                bind:value={newSchemaName}
+                                placeholder="Schema name (e.g., myapp_db)"
+                            />
+                            <button class="btn btn-primary" on:click={createSchema}>
+                                <Plus size="16" /> Create Schema
+                            </button>
+                        </div>
+                    </div>
+
+                    {#if schemas.length === 0}
+                        <div class="empty-state">
+                            <Database size="48" />
+                            <p>No schemas created yet</p>
+                            <small>Create your first MySQL database schema to get started</small>
+                        </div>
+                    {:else}
+                        <div class="schemas-list">
+                            {#each schemas as schema}
+                                <div class="schema-card">
+                                    <div class="schema-header">
+                                        <h3>📊 {schema.name}</h3>
+                                        <div class="schema-actions">
+                                            <button class="btn btn-sm btn-secondary" on:click={() => exportSchema(schema)}>
+                                                <Copy size="14" /> Export
+                                            </button>
+                                            <button class="btn btn-sm btn-danger" on:click={() => deleteSchema(schema.id)}>
+                                                <Trash size="14" /> Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="schema-content">
+                                        <div class="tables-section">
+                                            <h4>Tables ({schema.tables?.length || 0})</h4>
+                                            
+                                            <div class="add-table">
+                                                <input
+                                                    class="form-input form-input-sm"
+                                                    type="text"
+                                                    bind:value={newTableName}
+                                                    placeholder="Table name (e.g., users)"
+                                                />
+                                                <button class="btn btn-sm btn-primary" on:click={() => addTable(schema.id)}>
+                                                    <Plus size="14" /> Add Table
+                                                </button>
+                                            </div>
+
+                                            {#each (schema.tables || []) as table}
+                                                <div class="table-card">
+                                                    <div class="table-header">
+                                                        <h5>🗃️ {table.name}</h5>
+                                                        <div class="table-actions">
+                                                            <button class="btn btn-xs btn-secondary" on:click={() => {
+                                                                navigator.clipboard.writeText(generateCreateTableSQL(schema, table));
+                                                                showToast = true;
+                                                                setTimeout(() => showToast = false, 1200);
+                                                            }}>
+                                                                <Copy size="12" /> SQL
+                                                            </button>
+                                                            <button class="btn btn-xs btn-danger" on:click={() => deleteTable(schema.id, table.id)}>
+                                                                <Trash size="12" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    <div class="columns-section">
+                                                        <div class="add-column">
+                                                            <input
+                                                                class="form-input form-input-xs"
+                                                                type="text"
+                                                                bind:value={newColumnName}
+                                                                placeholder="Column name"
+                                                            />
+                                                            <select class="form-select form-select-xs" bind:value={newColumnType}>
+                                                                <option value="">Select type</option>
+                                                                <optgroup label="Numeric">
+                                                                    {#each mysqlTypes.filter(t => ['INT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'BIGINT', 'DECIMAL', 'FLOAT', 'DOUBLE', 'BIT'].includes(t.value)) as type}
+                                                                        <option value={type.value}>{type.label}</option>
+                                                                    {/each}
+                                                                </optgroup>
+                                                                <optgroup label="String">
+                                                                    {#each mysqlTypes.filter(t => ['VARCHAR', 'CHAR', 'TEXT', 'TINYTEXT', 'MEDIUMTEXT', 'LONGTEXT', 'BINARY', 'VARBINARY', 'BLOB', 'TINYBLOB', 'MEDIUMBLOB', 'LONGBLOB'].includes(t.value)) as type}
+                                                                        <option value={type.value}>{type.label}</option>
+                                                                    {/each}
+                                                                </optgroup>
+                                                                <optgroup label="Date & Time">
+                                                                    {#each mysqlTypes.filter(t => ['DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR'].includes(t.value)) as type}
+                                                                        <option value={type.value}>{type.label}</option>
+                                                                    {/each}
+                                                                </optgroup>
+                                                                <optgroup label="Other">
+                                                                    {#each mysqlTypes.filter(t => ['ENUM', 'SET', 'JSON', 'GEOMETRY', 'POINT', 'LINESTRING', 'POLYGON'].includes(t.value)) as type}
+                                                                        <option value={type.value}>{type.label}</option>
+                                                                    {/each}
+                                                                </optgroup>
+                                                            </select>
+                                                            {#if newColumnType && mysqlTypes.find(t => t.value === newColumnType)?.hasLength}
+                                                                <input
+                                                                    class="form-input form-input-xs"
+                                                                    type="text"
+                                                                    bind:value={newColumnLength}
+                                                                    placeholder="Length"
+                                                                />
+                                                            {/if}
+                                                            <button class="btn btn-xs btn-primary" on:click={() => addColumn(schema.id, table.id)}>
+                                                                <Plus size="12" />
+                                                            </button>
+                                                        </div>
+
+                                                        {#if table.columns && table.columns.length > 0}
+                                                            <div class="columns-list">
+                                                                <div class="column-header">
+                                                                    <span>Column</span>
+                                                                    <span>Type</span>
+                                                                    <span>Actions</span>
+                                                                </div>
+                                                                {#each table.columns as column}
+                                                                    <div class="column-item">
+                                                                        <span class="column-name">{column.name}</span>
+                                                                        <span class="column-type">
+                                                                            {column.type}{column.length ? `(${column.length})` : ''}
+                                                                        </span>
+                                                                        <button class="btn btn-xs btn-danger" on:click={() => deleteColumn(schema.id, table.id, column.id)}>
+                                                                            <Trash size="10" />
+                                                                        </button>
+                                                                    </div>
+                                                                {/each}
+                                                            </div>
+                                                        {:else}
+                                                            <div class="empty-columns">
+                                                                <small>No columns in this table</small>
+                                                            </div>
+                                                        {/if}
+                                                    </div>
+                                                </div>
+                                            {/each}
+                                        </div>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+
+                    {#if schemaStatus}
+                        <div class="status-message {schemaStatus.includes('Failed') || schemaStatus.includes('already exists') ? 'error' : 'success'}">
+                            {#if schemaStatus.includes('Failed') || schemaStatus.includes('already exists')}
+                                <AlertCircle size="16" />
+                            {:else}
+                                <CheckCircle size="16" />
+                            {/if}
+                            {schemaStatus}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+
+        <!-- ...rest of existing tab content... -->
     </main>
 
     {#if showToast}
@@ -968,612 +1467,4 @@
         box-sizing: border-box;
     }
 
-    .app-container {
-        min-height: 100vh;
-        width: 100vw;
-        margin: 0;
-        padding: 0;
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        color: #ffffff;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        position: relative;
-    }
-
-    /* Header */
-    .app-header {
-        background: rgba(0, 0, 0, 0.2);
-        backdrop-filter: blur(10px);
-        padding: 1.5rem 2rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-
-    .app-header h1 {
-        margin: 0 0 1rem 0;
-        font-size: 2.5rem;
-        font-weight: 700;
-        background: linear-gradient(45deg, #00f5ff, #00d4ff);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .status-bar {
-        display: flex;
-        gap: 2rem;
-        flex-wrap: wrap;
-    }
-
-    .status-indicator {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 1rem;
-        border-radius: 2rem;
-        background: rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(5px);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-
-    .indicator-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #ff6b6b;
-        animation: pulse 2s infinite;
-    }
-
-    .status-indicator.online .indicator-dot {
-        background: #51cf66;
-    }
-
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.5; }
-    }
-
-    /* Navigation */
-    .tab-navigation {
-        display: flex;
-        background: rgba(0, 0, 0, 0.1);
-        padding: 0 2rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        overflow-x: auto;
-    }
-
-    .tab-button {
-        background: none;
-        border: none;
-        color: rgba(255, 255, 255, 0.7);
-        padding: 1rem 1.5rem;
-        cursor: pointer;
-        font-size: 1rem;
-        font-weight: 500;
-        border-bottom: 3px solid transparent;
-        transition: all 0.3s ease;
-        white-space: nowrap;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .tab-button:hover {
-        color: #ffffff;
-        background: rgba(255, 255, 255, 0.1);
-    }
-
-    .tab-button.active {
-        color: #00f5ff;
-        border-bottom-color: #00f5ff;
-        background: rgba(0, 245, 255, 0.1);
-    }
-
-    /* Main Content */
-    .main-content {
-        padding: 2rem;
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    .tab-content {
-        animation: fadeIn 0.3s ease;
-    }
-
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-
-    .card {
-        background: rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
-        border-radius: 1rem;
-        padding: 2rem;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    }
-
-    .card h2 {
-        margin: 0 0 1.5rem 0;
-        font-size: 1.8rem;
-        color: #ffffff;
-    }
-
-    /* Buttons */
-    .btn {
-        background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
-        color: #ffffff;
-        border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: 0.5rem;
-        cursor: pointer;
-        font-size: 1rem;
-        font-weight: 500;
-        transition: all 0.3s ease;
-        text-decoration: none;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    }
-
-    .btn:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-        transform: none;
-    }
-
-    .btn-primary {
-        background: linear-gradient(45deg, #00f5ff, #00d4ff);
-    }
-
-    .btn-secondary {
-        background: linear-gradient(45deg, #a8edea, #fed6e3);
-        color: #333;
-    }
-
-    .btn-danger {
-        background: linear-gradient(45deg, #ff6b6b, #ee5a52);
-    }
-
-    .btn-sm {
-        padding: 0.5rem 1rem;
-        font-size: 0.875rem;
-    }
-
-    .btn-large {
-        padding: 1rem 2rem;
-        font-size: 1.1rem;
-    }
-
-    /* Terminal */
-    .terminal-container {
-        background: #1a1a1a;
-        border-radius: 0.5rem;
-        overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        margin-top: 1rem;
-    }
-
-    .terminal-output {
-        background: #1a1a1a;
-        color: #e0e0e0;
-        padding: 1rem;
-        min-height: 300px;
-        max-height: 400px;
-        overflow-y: auto;
-        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-        font-size: 0.9rem;
-        line-height: 1.4;
-        white-space: pre-wrap;
-    }
-
-    .terminal-input-line {
-        background: #222;
-        padding: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
-    }
-
-    .prompt {
-        color: #00f5ff;
-        font-weight: bold;
-        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-    }
-
-    .terminal-input {
-        flex: 1;
-        background: #333;
-        color: #e0e0e0;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-    }
-
-    .terminal-input:focus {
-        outline: none;
-        border-color: #00f5ff;
-    }
-
-    .terminal-actions {
-        display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-    }
-
-    /* Forms */
-    .form-section {
-        margin-bottom: 2rem;
-    }
-
-    .form-section h3 {
-        margin: 0 0 1rem 0;
-        color: #00f5ff;
-        font-size: 1.3rem;
-    }
-
-    .form-label {
-        display: block;
-        margin-bottom: 1rem;
-        font-weight: 500;
-        color: #ffffff;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-
-    .form-label > span:first-child {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .form-input, .form-select {
-        width: 100%;
-        padding: 0.75rem;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        border-radius: 0.5rem;
-        background: rgba(255, 255, 255, 0.1);
-        color: #ffffff;
-        font-size: 1rem;
-    }
-
-    .form-input:focus, .form-select:focus {
-        outline: none;
-        border-color: #00f5ff;
-        box-shadow: 0 0 0 2px rgba(0, 245, 255, 0.2);
-    }
-
-    .form-range {
-        width: 100%;
-        margin-top: 0.5rem;
-        appearance: none;
-        height: 6px;
-        background: rgba(255, 255, 255, 0.2);
-        border-radius: 3px;
-        outline: none;
-    }
-
-    .form-range::-webkit-slider-thumb {
-        appearance: none;
-        width: 20px;
-        height: 20px;
-        background: #00f5ff;
-        border-radius: 50%;
-        cursor: pointer;
-    }
-
-    .form-range::-moz-range-thumb {
-        width: 20px;
-        height: 20px;
-        background: #00f5ff;
-        border-radius: 50%;
-        cursor: pointer;
-        border: none;
-    }
-
-    .range-labels {
-        display: flex;
-        justify-content: space-between;
-        margin-top: 0.25rem;
-        font-size: 0.8rem;
-        color: rgba(255, 255, 255, 0.7);
-    }
-
-    .form-actions {
-        display: flex;
-        gap: 1rem;
-        flex-wrap: wrap;
-        margin-top: 2rem;
-    }
-
-    .resource-group {
-        margin-bottom: 1.5rem;
-    }
-
-    .resource-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 1rem;
-    }
-
-    .checkbox-label {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        cursor: pointer;
-    }
-
-    .checkbox-label input[type="checkbox"] {
-        width: auto;
-        margin: 0;
-    }
-
-    /* Peers */
-    .peers-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-        gap: 1.5rem;
-        margin-top: 1rem;
-    }
-
-    .peer-card {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 0.75rem;
-        padding: 1.5rem;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        transition: transform 0.2s ease;
-    }
-
-    .peer-card:hover {
-        transform: translateY(-2px);
-    }
-
-    .peer-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-    }
-
-    .peer-header h3 {
-        margin: 0;
-        color: #ffffff;
-    }
-
-    .peer-status {
-        padding: 0.25rem 0.75rem;
-        border-radius: 1rem;
-        font-size: 0.8rem;
-        font-weight: 500;
-    }
-
-    .peer-status.online {
-        background: rgba(81, 207, 102, 0.2);
-        color: #51cf66;
-        border: 1px solid #51cf66;
-    }
-
-    .peer-stats {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 1rem;
-    }
-
-    .stat {
-        display: flex;
-        flex-direction: column;
-        gap: 0.25rem;
-    }
-
-    .stat-label {
-        font-size: 0.8rem;
-        color: rgba(255, 255, 255, 0.7);
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        display: flex;
-        align-items: center;
-        gap: 0.25rem;
-    }
-
-    .stat-value {
-        font-weight: 600;
-        color: #ffffff;
-    }
-
-    /* Connection Progress */
-    .connection-progress {
-        margin-top: 2rem;
-        padding: 1.5rem;
-        background: rgba(0, 0, 0, 0.2);
-        border-radius: 0.5rem;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-
-    .progress-steps {
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-
-    .step {
-        padding: 0.75rem;
-        border-radius: 0.5rem;
-        background: rgba(255, 255, 255, 0.1);
-        opacity: 0.5;
-        transition: all 0.3s ease;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .step.completed {
-        opacity: 1;
-        background: rgba(81, 207, 102, 0.2);
-        color: #51cf66;
-    }
-
-    /* Messages */
-    .status-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-top: 1rem;
-        font-weight: 500;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .status-message.success {
-        background: rgba(81, 207, 102, 0.2);
-        color: #51cf66;
-        border: 1px solid #51cf66;
-    }
-
-    .status-message.error {
-        background: rgba(255, 107, 107, 0.2);
-        color: #ff6b6b;
-        border: 1px solid #ff6b6b;
-    }
-
-    .error-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background: rgba(255, 107, 107, 0.2);
-        color: #ff6b6b;
-        border: 1px solid #ff6b6b;
-        margin-top: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    /* Empty States */
-    .empty-state {
-        text-align: center;
-        padding: 3rem 1rem;
-        color: rgba(255, 255, 255, 0.7);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 1rem;
-    }
-
-    .empty-state p {
-        font-size: 1.2rem;
-        margin: 0;
-    }
-
-    .info-box {
-        text-align: center;
-        padding: 2rem;
-        background: rgba(0, 245, 255, 0.1);
-        border-radius: 0.75rem;
-        border: 1px solid rgba(0, 245, 255, 0.3);
-    }
-
-    .info-box p {
-        margin-bottom: 1rem;
-        font-size: 1.1rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 0.5rem;
-    }
-
-    /* Loading */
-    .loading {
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        padding: 2rem;
-        justify-content: center;
-    }
-
-    :global(.spinner) {
-        animation: spin 1s linear infinite;
-    }
-
-    :global(.spinner-sm) {
-        animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
-
-    /* Toast */
-    .toast {
-        position: fixed;
-        bottom: 2rem;
-        right: 2rem;
-        background: rgba(0, 0, 0, 0.9);
-        color: #ffffff;
-        padding: 1rem 1.5rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        z-index: 1000;
-        animation: slideIn 0.3s ease, slideOut 0.3s ease 2s forwards;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    @keyframes slideIn {
-        from { transform: translateX(100%); }
-        to { transform: translateX(0); }
-    }
-
-    @keyframes slideOut {
-        from { transform: translateX(0); }
-        to { transform: translateX(100%); }
-    }
-
-    /* Responsive */
-    @media (max-width: 768px) {
-        .app-header {
-            padding: 1rem;
-        }
-        
-        .app-header h1 {
-            font-size: 2rem;
-        }
-        
-        .main-content {
-            padding: 1rem;
-        }
-        
-        .card {
-            padding: 1.5rem;
-        }
-        
-        .status-bar {
-            flex-direction: column;
-            gap: 0.5rem;
-        }
-        
-        .form-actions {
-            flex-direction: column;
-        }
-        
-        .peers-grid {
-            grid-template-columns: 1fr;
-        }
-        
-        .resource-grid {
-            grid-template-columns: 1fr;
-        }
-    }
 </style>
