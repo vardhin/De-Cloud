@@ -9,17 +9,18 @@ const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const ioClient = require('socket.io-client');
-const os = require('os'); // <-- Add this line
+const os = require('os');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const SUPER_PEER_URL = 'https://test.vardhin.tech/gun';
+const SUPER_PEER_API_URL = SUPER_PEER_URL.replace(/\/gun$/, '');
 
 // Connect to the super peer (relay)
 const gun = Gun({
   peers: [SUPER_PEER_URL],
-  // No 'web' or 'super' options: this is a normal peer
   radisk: true,
   file: 'client-data'
 });
@@ -53,24 +54,357 @@ app.get('/read/:key', (req, res) => {
   });
 });
 
-// Proxy /peers from superpeer
-app.get('/peers', async (req, res) => {
+// ======================
+// DATABASE PROXY ENDPOINTS
+// ======================
+
+// Proxy: Create database from schema
+app.post('/database/create', async (req, res) => {
   try {
-    const resp = await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/peers`);
-    const data = await resp.json();
+    console.log('Received database creation request:', JSON.stringify(req.body, null, 2));
+    
+    // Validate request body
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
+    
+    const { schema, requestedSpace, allocatedPeers } = req.body;
+    
+    if (!schema || !schema.name) {
+      return res.status(400).json({ error: 'Schema with name is required' });
+    }
+    
+    if (!requestedSpace || typeof requestedSpace !== 'number' || requestedSpace <= 0) {
+      return res.status(400).json({ error: 'Valid requestedSpace is required' });
+    }
+    
+    console.log('Forwarding request to superpeer:', SUPER_PEER_API_URL);
+    
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    
+    console.log('Superpeer response status:', response.status);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Superpeer error response:', errorText);
+      return res.status(response.status).json({ 
+        error: `Superpeer error: ${errorText}` 
+      });
+    }
+    
+    const data = await response.json();
+    console.log('Superpeer success response:', data);
+    
     res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to fetch peers from superpeer' });
+  } catch (error) {
+    console.error('Database creation proxy error:', error);
+    res.status(500).json({ 
+      error: 'Failed to connect to superpeer: ' + error.message 
+    });
   }
 });
 
-app.get('/superpeer-status', async (req, res) => {
-  const available = await isSuperPeerAvailable();
-  res.json({
-    connected: available,
-    superPeerUrl: SUPER_PEER_URL
-  });
+// Proxy: List all databases
+app.get('/databases', async (req, res) => {
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/databases`);
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
 });
+
+// Proxy: INSERT - Create new record
+app.post('/database/:dbName/:tableName', async (req, res) => {
+  const { dbName, tableName } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
+// Proxy: SELECT - Read records
+app.get('/database/:dbName/:tableName', async (req, res) => {
+  const { dbName, tableName } = req.params;
+  const queryParams = new URLSearchParams(req.query).toString();
+  const url = `${SUPER_PEER_API_URL}/database/${dbName}/${tableName}${queryParams ? '?' + queryParams : ''}`;
+  
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
+// Proxy: UPDATE - Update record
+app.put('/database/:dbName/:tableName/:id', async (req, res) => {
+  const { dbName, tableName, id } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
+// Proxy: DELETE - Delete record
+app.delete('/database/:dbName/:tableName/:id', async (req, res) => {
+  const { dbName, tableName, id } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/${id}`, {
+      method: 'DELETE'
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
+// Proxy: Get table schema
+app.get('/database/:dbName/:tableName/schema', async (req, res) => {
+  const { dbName, tableName } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/schema`);
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
+// ======================
+// RESOURCE MONITORING ENDPOINTS
+// ======================
+
+// Get superpeer resources and stats
+app.get('/superpeer/resources', async (req, res) => {
+  try {
+    const [healthResponse, statsResponse] = await Promise.all([
+      fetch(`${SUPER_PEER_API_URL}/health`),
+      fetch(`${SUPER_PEER_API_URL}/stats`)
+    ]);
+    
+    const health = await healthResponse.json();
+    const stats = await statsResponse.json();
+    
+    // Get disk usage info (approximate)
+    const diskUsage = await getDiskUsage();
+    
+    res.json({
+      status: health.status,
+      timestamp: health.timestamp,
+      type: health.type,
+      connectedPeers: stats.connectedPeers,
+      uptime: stats.uptime,
+      memory: stats.memory,
+      diskUsage: diskUsage,
+      availableSpace: diskUsage.available,
+      totalSpace: diskUsage.total,
+      usedSpace: diskUsage.used,
+      freeSpacePercentage: diskUsage.freePercentage
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get superpeer resources: ' + error.message });
+  }
+});
+
+// Get disk usage estimation
+async function getDiskUsage() {
+  try {
+    const disks = await si.fsSize();
+    const mainDisk = disks.find(d => d.mount === '/') || disks[0];
+    
+    if (!mainDisk) {
+      return {
+        total: 0,
+        used: 0,
+        available: 0,
+        freePercentage: 0
+      };
+    }
+    
+    return {
+      total: mainDisk.size,
+      used: mainDisk.used,
+      available: mainDisk.available,
+      freePercentage: Math.round((mainDisk.available / mainDisk.size) * 100)
+    };
+  } catch (error) {
+    return {
+      total: 0,
+      used: 0,
+      available: 0,
+      freePercentage: 0
+    };
+  }
+}
+
+// Get all peers with their available resources
+app.get('/peers', async (req, res) => {
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/peers`);
+    const data = await response.json();
+    
+    // Add resource utilization percentages
+    const peersWithStats = data.peers.map(peer => ({
+      ...peer,
+      ramUtilization: peer.totalRam > 0 ? Math.round(((peer.totalRam - peer.availableRam) / peer.totalRam) * 100) : 0,
+      storageUtilization: peer.totalStorage > 0 ? Math.round(((peer.totalStorage - peer.availableStorage) / peer.totalStorage) * 100) : 0,
+      ramAvailableGB: Math.round(peer.availableRam / (1024 * 1024 * 1024) * 100) / 100,
+      storageAvailableGB: Math.round(peer.availableStorage / (1024 * 1024 * 1024) * 100) / 100,
+      totalRamGB: Math.round(peer.totalRam / (1024 * 1024 * 1024) * 100) / 100,
+      totalStorageGB: Math.round(peer.totalStorage / (1024 * 1024 * 1024) * 100) / 100,
+      status: (Date.now() - peer.lastSeen) < 2 * 60 * 1000 ? 'online' : 'offline'
+    }));
+    
+    res.json({ 
+      peers: peersWithStats,
+      totalPeers: peersWithStats.length,
+      onlinePeers: peersWithStats.filter(p => p.status === 'online').length,
+      totalAvailableRAM: peersWithStats.reduce((sum, p) => sum + p.availableRam, 0),
+      totalAvailableStorage: peersWithStats.reduce((sum, p) => sum + p.availableStorage, 0)
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch peers from superpeer: ' + error.message });
+  }
+});
+
+// Get network-wide resource summary
+app.get('/network/resources', async (req, res) => {
+  try {
+    const [peersResponse, superpeerResponse] = await Promise.all([
+      fetch(`${SUPER_PEER_API_URL}/peers`),
+      fetch(`${SUPER_PEER_API_URL}/stats`)
+    ]);
+    
+    const peersData = await peersResponse.json();
+    const superpeerStats = await superpeerResponse.json();
+    const superpeerDisk = await getDiskUsage();
+    
+    const peers = peersData.peers || [];
+    const onlinePeers = peers.filter(p => (Date.now() - p.lastSeen) < 2 * 60 * 1000);
+    
+    // Calculate network totals
+    const networkTotals = {
+      peers: {
+        total: peers.length,
+        online: onlinePeers.length,
+        offline: peers.length - onlinePeers.length
+      },
+      ram: {
+        total: onlinePeers.reduce((sum, p) => sum + p.totalRam, 0),
+        available: onlinePeers.reduce((sum, p) => sum + p.availableRam, 0),
+        used: onlinePeers.reduce((sum, p) => sum + (p.totalRam - p.availableRam), 0)
+      },
+      storage: {
+        total: onlinePeers.reduce((sum, p) => sum + p.totalStorage, 0),
+        available: onlinePeers.reduce((sum, p) => sum + p.availableStorage, 0),
+        used: onlinePeers.reduce((sum, p) => sum + (p.totalStorage - p.availableStorage), 0)
+      },
+      cpu: {
+        totalCores: onlinePeers.reduce((sum, p) => sum + p.cpuCores, 0),
+        totalThreads: onlinePeers.reduce((sum, p) => sum + p.cpuThreads, 0)
+      },
+      superpeer: {
+        memory: superpeerStats.memory,
+        uptime: superpeerStats.uptime,
+        disk: superpeerDisk,
+        connectedPeers: superpeerStats.connectedPeers
+      }
+    };
+    
+    // Add formatted values
+    networkTotals.ram.totalGB = Math.round(networkTotals.ram.total / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.ram.availableGB = Math.round(networkTotals.ram.available / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.ram.usedGB = Math.round(networkTotals.ram.used / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.ram.utilization = networkTotals.ram.total > 0 ? Math.round((networkTotals.ram.used / networkTotals.ram.total) * 100) : 0;
+    
+    networkTotals.storage.totalGB = Math.round(networkTotals.storage.total / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.storage.availableGB = Math.round(networkTotals.storage.available / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.storage.usedGB = Math.round(networkTotals.storage.used / (1024 * 1024 * 1024) * 100) / 100;
+    networkTotals.storage.utilization = networkTotals.storage.total > 0 ? Math.round((networkTotals.storage.used / networkTotals.storage.total) * 100) : 0;
+    
+    res.json(networkTotals);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get network resources: ' + error.message });
+  }
+});
+
+// Check if enough resources are available for allocation
+app.post('/network/check-allocation', async (req, res) => {
+  const { ram, storage, cpu, gpu } = req.body;
+  
+  if (!ram && !storage && !cpu && !gpu) {
+    return res.status(400).json({ error: 'At least one resource requirement must be specified' });
+  }
+  
+  try {
+    // Get current peers
+    const response = await fetch(`${SUPER_PEER_API_URL}/peers`);
+    const data = await response.json();
+    const peers = data.peers || [];
+    
+    // Filter suitable peers
+    const suitablePeers = peers.filter(peer => {
+      const hasEnoughRam = !ram || peer.availableRam >= ram;
+      const hasEnoughStorage = !storage || peer.availableStorage >= storage;
+      const hasGpu = !gpu || (peer.gpu && peer.gpu !== 'none');
+      const hasEnoughCpu = !cpu || peer.cpuCores >= cpu;
+      
+      return hasEnoughRam && hasEnoughStorage && hasGpu && hasEnoughCpu;
+    });
+    
+    // Calculate totals
+    const totalAvailableRam = suitablePeers.reduce((sum, peer) => sum + peer.availableRam, 0);
+    const totalAvailableStorage = suitablePeers.reduce((sum, peer) => sum + peer.availableStorage, 0);
+    const totalCpuCores = suitablePeers.reduce((sum, peer) => sum + peer.cpuCores, 0);
+    
+    const canAllocate = (!ram || totalAvailableRam >= ram) &&
+                       (!storage || totalAvailableStorage >= storage) &&
+                       (!cpu || totalCpuCores >= cpu) &&
+                       (!gpu || suitablePeers.some(peer => peer.gpu && peer.gpu !== 'none'));
+    
+    res.json({
+      canAllocate,
+      suitablePeers: suitablePeers.length,
+      suitablePeersList: suitablePeers,
+      totalAvailable: {
+        ram: totalAvailableRam,
+        storage: totalAvailableStorage,
+        cpu: totalCpuCores,
+        gpu: suitablePeers.filter(peer => peer.gpu && peer.gpu !== 'none').length
+      },
+      requested: { ram, storage, cpu, gpu }
+    });
+  } catch (error) {
+    console.error('Error checking allocation:', error);
+    res.status(500).json({ error: 'Failed to check allocation: ' + error.message });
+  }
+});
+
+// ======================
+// EXISTING CODE CONTINUES...
+// ======================
 
 async function getResourceInfo() {
   const mem = await si.mem();
@@ -86,24 +420,44 @@ async function getResourceInfo() {
     availableStorage: disk.available || 0,
     gpu: gpu.model || 'none',
     cpuCores: cpu.cores,
-    cpuThreads: cpu.processors || cpu.physicalCores || cpu.cores // fallback if processors not present
+    cpuThreads: cpu.processors || cpu.physicalCores || cpu.cores
   };
 }
 
 async function isSuperPeerAvailable() {
   try {
-    const resp = await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/health`);
-    if (!resp.ok) return false;
+    console.log('Checking superpeer availability at:', SUPER_PEER_API_URL);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    const resp = await fetch(`${SUPER_PEER_API_URL}/health`, {
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!resp.ok) {
+      console.log('Superpeer health check failed with status:', resp.status);
+      return false;
+    }
+    
     const data = await resp.json();
+    console.log('Superpeer health check response:', data);
+    
     return data.status === 'healthy';
-  } catch {
+  } catch (error) {
+    console.log('Superpeer availability check failed:', error.message);
     return false;
   }
 }
 
-const containers = {}; // containerId -> Docker container instance
-const containerResources = {}; // containerId -> {ram, cpu, gpu}
-const containerSecrets = {}; // containerId -> secretKey
+const containers = {};
+const containerResources = {};
+const containerSecrets = {};
 const dockerUtil = new DockerUtility();
 
 let availableRam = null;
@@ -111,7 +465,6 @@ let availableStorage = null;
 let totalRam = null;
 let totalStorage = null;
 
-// Helper: update available resources and notify superpeer
 async function updateAvailableResources() {
     try {
         const mem = await si.mem();
@@ -120,7 +473,6 @@ async function updateAvailableResources() {
         totalRam = mem.total;
         totalStorage = disk.size || 0;
 
-        // Subtract RAM/storage used by all running containers
         let usedRam = 0;
         let usedStorage = 0;
         for (const res of Object.values(containerResources)) {
@@ -130,9 +482,8 @@ async function updateAvailableResources() {
         availableRam = Math.max(0, mem.available - usedRam);
         availableStorage = Math.max(0, (disk.available || 0) - usedStorage);
 
-        // Notify superpeer
         try {
-            await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/register`, {
+            await fetch(`${SUPER_PEER_API_URL}/register`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -152,7 +503,6 @@ async function updateAvailableResources() {
     }
 }
 
-// Get max resources
 app.get('/resources', async (req, res) => {
     const mem = await si.mem();
     const disks = await si.fsSize();
@@ -170,16 +520,15 @@ app.get('/resources', async (req, res) => {
     });
 });
 
-let peerConfig = {}; // Will hold config loaded from Gun.js
+let peerConfig = {};
 
 const PEER_DB_KEY = `peer/${peerConfig.name || 'unnamed-peer'}/containers`;
-const PEER_REG_KEY = `peer/config/registration`; // Use a single config key
+const PEER_REG_KEY = `peer/config/registration`;
 
-// Load config from Gun.js at startup
 gun.get(PEER_REG_KEY).on(data => {
   if (data) {
     peerConfig = data;
-    console.log('peerConfig loaded from Gun:', peerConfig); // <-- Add this line
+    console.log('peerConfig loaded from Gun:', peerConfig);
   }
 });
 
@@ -225,7 +574,7 @@ app.post('/register_superpeer', express.json(), async (req, res) => {
         delete cleanPayload['>'];
 
         console.log('[CLIENT] Attempting to register with superpeer:', cleanPayload);
-        const response = await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/register`, {
+        const response = await fetch(`${SUPER_PEER_API_URL}/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cleanPayload)
@@ -247,7 +596,7 @@ app.post('/register_superpeer', express.json(), async (req, res) => {
 app.post('/deregister_superpeer', async (req, res) => {
     if (!peerConfig.name) return res.status(400).json({ error: 'not registered' });
     try {
-        await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/register`, {
+        await fetch(`${SUPER_PEER_API_URL}/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: peerConfig.name, deregister: true })
@@ -260,7 +609,6 @@ app.post('/deregister_superpeer', async (req, res) => {
     }
 });
 
-// --- Docker REST API endpoints ---
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
@@ -622,7 +970,7 @@ app.post('/connect/:peer', express.json(), async (req, res) => {
 setInterval(async () => {
     if (peerConfig && peerConfig.name) {
         try {
-            await fetch(`${SUPER_PEER_URL.replace(/\/gun$/, '')}/register`, {
+            await fetch(`${SUPER_PEER_API_URL}/register`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -641,6 +989,183 @@ const port = 8766;
 server.listen(port, () => {
   console.log(`Gun.js Normal Peer (with Docker) running on port ${port}`);
   console.log(`Connected to super peer at ${SUPER_PEER_URL}`);
+  console.log('Database proxy endpoints available:');
+  console.log('- POST /database/create - Create database from schema');
+  console.log('- GET /databases - List all databases');
+  console.log('- POST /database/:dbName/:tableName - Insert record');
+  console.log('- GET /database/:dbName/:tableName - Get all records');
+  console.log('- PUT /database/:dbName/:tableName/:id - Update record');
+  console.log('- DELETE /database/:dbName/:tableName/:id - Delete record');
+  console.log('Resource monitoring endpoints:');
+  console.log('- GET /superpeer/resources - Get superpeer resources');
+  console.log('- GET /network/resources - Get network-wide resources');
+  console.log('- POST /network/check-allocation - Check if resources can be allocated');
+});
+
+// Get superpeer connection status
+app.get('/superpeer-status', async (req, res) => {
+  try {
+    // Check if superpeer is reachable
+    const isAvailable = await isSuperPeerAvailable();
+    
+    if (!isAvailable) {
+      return res.json({
+        connected: false,
+        superPeerUrl: SUPER_PEER_URL,
+        error: 'Superpeer not reachable'
+      });
+    }
+
+    // Get superpeer health
+    const healthResponse = await fetch(`${SUPER_PEER_API_URL}/health`);
+    const healthData = await healthResponse.json();
+
+    // Check if this peer is registered
+    const isRegistered = peerConfig && peerConfig.registered;
+    
+    res.json({
+      connected: true,
+      superPeerUrl: SUPER_PEER_URL,
+      superPeerHealth: healthData,
+      peerRegistered: isRegistered,
+      peerName: peerConfig.name || 'unnamed-peer',
+      lastHealthCheck: Date.now()
+    });
+  } catch (error) {
+    res.json({
+      connected: false,
+      superPeerUrl: SUPER_PEER_URL,
+      error: error.message
+    });
+  }
+});
+
+// Register peer locally (different from superpeer registration)
+app.post('/register', async (req, res) => {
+  try {
+    const data = req.body;
+    if (!data.name) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    
+    // Save to local Gun.js storage
+    gun.get(PEER_REG_KEY).put({
+      ...data,
+      registered: true,
+      timestamp: Date.now()
+    });
+    
+    peerConfig = {
+      ...data,
+      registered: true,
+      timestamp: Date.now()
+    };
+    
+    res.json({ status: 'registered' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deregister peer locally
+app.post('/deregister', async (req, res) => {
+  try {
+    if (peerConfig.name) {
+      gun.get(PEER_REG_KEY).put({
+        ...peerConfig,
+        registered: false,
+        timestamp: Date.now()
+      });
+      
+      peerConfig = {
+        ...peerConfig,
+        registered: false,
+        timestamp: Date.now()
+      };
+    }
+    
+    res.json({ status: 'deregistered' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get current peer configuration
+app.get('/config', (req, res) => {
+  res.json(peerConfig || {});
+});
+
+// Update peer configuration
+app.post('/config', async (req, res) => {
+  try {
+    const data = req.body;
+    peerConfig = { ...peerConfig, ...data, timestamp: Date.now() };
+    
+    gun.get(PEER_REG_KEY).put(peerConfig);
+    
+    res.json({ status: 'updated', config: peerConfig });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get container list
+app.get('/containers', (req, res) => {
+  const containerList = Object.keys(containers).map(id => ({
+    id,
+    resources: containerResources[id],
+    hasSecret: !!containerSecrets[id]
+  }));
+  
+  res.json({ containers: containerList });
+});
+
+// Get container details
+app.get('/container/:id', (req, res) => {
+  const { id } = req.params;
+  const container = containers[id];
+  
+  if (!container) {
+    return res.status(404).json({ error: 'Container not found' });
+  }
+  
+  res.json({
+    id,
+    resources: containerResources[id],
+    hasSecret: !!containerSecrets[id],
+    status: 'running' // You might want to check actual container status
+  });
+});
+
+// Test connection to superpeer
+app.get('/test-superpeer', async (req, res) => {
+  try {
+    const isAvailable = await isSuperPeerAvailable();
+    
+    if (!isAvailable) {
+      return res.status(503).json({ 
+        error: 'Superpeer not reachable',
+        url: SUPER_PEER_URL 
+      });
+    }
+    
+    // Test actual API call
+    const response = await fetch(`${SUPER_PEER_API_URL}/health`);
+    const data = await response.json();
+    
+    res.json({
+      status: 'success',
+      superpeerUrl: SUPER_PEER_URL,
+      superpeerHealth: data,
+      message: 'Superpeer connection test successful'
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Superpeer connection test failed',
+      message: error.message,
+      url: SUPER_PEER_URL
+    });
+  }
 });
 
 module.exports = { app, gun };
