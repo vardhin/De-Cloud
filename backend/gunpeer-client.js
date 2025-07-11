@@ -522,29 +522,52 @@ app.post('/docker/tunnel/connect', (req, res) => {
 
 // Connect to another peer via superpeer (request_container)
 app.post('/connect/:peer', express.json(), async (req, res) => {
+    console.log('[CONNECT] Received connection request for peer:', req.params.peer);
+    console.log('[CONNECT] Request body:', req.body);
+    console.log('[CONNECT] Peer config:', peerConfig);
+    
     if (!peerConfig.registered) {
+        console.log('[CONNECT] Peer is not registered');
         return res.status(400).json({ error: 'Peer is not registered. Please register to superpeer first.' });
     }
 
     const targetPeer = req.params.peer;
     const { ram, cpu, gpu } = req.body;
+    
+    // Validate input
+    if (!targetPeer) {
+        return res.status(400).json({ error: 'Target peer name is required' });
+    }
+    
+    if (!ram || ram < 1024 * 1024) {
+        return res.status(400).json({ error: 'RAM must be at least 1MB' });
+    }
+    
+    console.log('[CONNECT] Connecting to superpeer socket...');
     const socket = connectSuperpeerSocket();
 
     function sendTunnelRequest() {
         let responded = false;
+        console.log('[CONNECT] Sending tunnel request to:', targetPeer);
+        
         // Listen for response
         function onTunnelResponse(data) {
+            console.log('[CONNECT] Received tunnel response:', data);
+            
             if (
                 data.payload &&
                 data.payload.action === 'request_container_result' &&
                 data.payload.userId === targetPeer
             ) {
                 socket.off('tunnel', onTunnelResponse);
-                clearTimeout(timeout); // <-- Clear the timeout!
+                clearTimeout(timeout);
                 responded = true;
+                
                 if (data.payload.error) {
+                    console.log('[CONNECT] Error from peer:', data.payload.error);
                     res.status(500).json({ error: data.payload.error });
                 } else {
+                    console.log('[CONNECT] Success:', data.payload);
                     res.json({
                         containerId: data.payload.containerId,
                         secretKey: data.payload.secretKey,
@@ -553,30 +576,45 @@ app.post('/connect/:peer', express.json(), async (req, res) => {
                 }
             }
         }
+        
         socket.on('tunnel', onTunnelResponse);
 
         // Send tunnel request to target peer via superpeer
-        socket.emit('tunnel', {
+        const tunnelMessage = {
             target: targetPeer,
             payload: {
                 action: 'request_container',
                 resources: { ram, cpu, gpu }
             }
-        });
+        };
+        
+        console.log('[CONNECT] Emitting tunnel message:', tunnelMessage);
+        socket.emit('tunnel', tunnelMessage);
 
         // Timeout in 15s
         const timeout = setTimeout(() => {
             socket.off('tunnel', onTunnelResponse);
             if (!responded) {
-                res.status(504).json({ error: 'Timeout waiting for peer response' });
+                console.log('[CONNECT] Timeout waiting for peer response');
+                res.status(504).json({ error: 'Timeout waiting for peer response. The target peer may be offline or unreachable.' });
             }
         }, 15000);
     }
 
     if (socket.connected) {
+        console.log('[CONNECT] Socket already connected, sending request');
         sendTunnelRequest();
     } else {
-        socket.once('connect', sendTunnelRequest);
+        console.log('[CONNECT] Socket not connected, waiting for connection...');
+        socket.once('connect', () => {
+            console.log('[CONNECT] Socket connected, sending request');
+            sendTunnelRequest();
+        });
+        
+        socket.once('connect_error', (err) => {
+            console.log('[CONNECT] Socket connection error:', err);
+            res.status(500).json({ error: 'Failed to connect to superpeer: ' + err.message });
+        });
     }
 });
 

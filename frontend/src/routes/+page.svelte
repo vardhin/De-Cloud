@@ -2,6 +2,34 @@
     import { onMount, onDestroy, afterUpdate } from 'svelte';
     import AnsiToHtml from 'ansi-to-html';
     import { v4 as uuidv4 } from 'uuid';
+    
+    // Import Lucide icons
+    import { 
+        Terminal, 
+        Globe, 
+        Settings, 
+        Link, 
+        Rocket, 
+        Copy, 
+        Trash2, 
+        Square, 
+        Play, 
+        Save, 
+        RotateCcw, 
+        Radio, 
+        UserX, 
+        Search, 
+        CheckCircle, 
+        AlertCircle, 
+        Loader2,
+        HardDrive,
+        Cpu,
+        Zap,
+        Clock,
+        Check,
+        X
+    } from 'lucide-svelte';
+    
     let command = '';
     let output = '';
     let status = '';
@@ -10,15 +38,29 @@
     let connecting = true;
     let outputDiv;
     let inputEl;
+    let showToast = false;
+    
+    // Add the missing activeTab variable
+    let activeTab = 'console';
 
     const ansiConverter = new AnsiToHtml({ fg: '#e0e0e0', bg: '#181818' });
 
     function cleanTerminalOutput(data) {
+        if (typeof data !== 'string') {
+            console.warn('Non-string data received:', data);
+            return '';
+        }
+        
+        // Remove OSC sequences
         data = data.replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '');
+        // Remove bracketed paste mode
         data = data.replace(/\x1b\[\?2004[hl]/g, '');
+        // Remove other control characters except newlines and tabs
         data = data.replace(/[\x00-\x08\x0B-\x1A\x1C-\x1F\x7F]/g, '');
+        
         return data;
     }
+
     // Helper to format bytes as human-readable
     function formatBytes(bytes) {
         if (!bytes || isNaN(bytes)) return '-';
@@ -41,18 +83,30 @@
     function connectSocket() {
         connecting = true;
         import('socket.io-client').then(({ io }) => {
-            socket = io('http://localhost:8766'); // <-- changed from 3000 to 8766
+            socket = io('http://localhost:8766', {
+                timeout: 10000,
+                reconnection: true,
+                reconnectionDelay: 1000,
+                reconnectionAttempts: 3
+            });
+            
             socket.on('connect', () => {
                 connected = true;
                 connecting = false;
                 status = 'Connected to container';
                 output = '';
                 focusInput();
-                // Start session with backend
                 socket.emit('start-session', { config: {}, sessionId });
             });
+            
+            socket.on('connect_error', (error) => {
+                console.error('Socket connection error:', error);
+                status = 'Connection failed: ' + error.message;
+                connected = false;
+                connecting = false;
+            });
+            
             socket.on('output', (data) => {
-                // If backend sends { sessionId, data }
                 if (typeof data === 'object' && data.sessionId && data.data && data.sessionId === sessionId) {
                     output += ansiConverter.toHtml(cleanTerminalOutput(data.data));
                 } else if (typeof data === 'string') {
@@ -75,6 +129,10 @@
                 connected = false;
                 connecting = false;
             });
+        }).catch(error => {
+            console.error('Failed to load socket.io-client:', error);
+            status = 'Failed to load socket client';
+            connecting = false;
         });
     }
 
@@ -120,7 +178,6 @@
     }
 
     function globalShortcuts(e) {
-        // Ctrl+L to clear, Ctrl+K to focus input
         if (e.ctrlKey && e.key === 'l') {
             e.preventDefault();
             output = '';
@@ -131,7 +188,6 @@
         }
     }
 
-    let showToast = false;
     function copyOutput() {
         const temp = document.createElement('div');
         temp.innerHTML = output;
@@ -170,7 +226,6 @@
         try {
             const res = await fetch('http://localhost:8766/peers');
             let text = await res.text();
-            // Remove any trailing '%' or invalid JSON characters
             text = text.trim().replace(/%+$/, '');
             const data = JSON.parse(text);
             peers = Array.isArray(data.peers) ? data.peers : [];
@@ -198,22 +253,21 @@
     let isRegistered = false;
     let cpuSlider = 1;
 
-    // Fetch max available resources from backend
     async function fetchResources() {
         try {
             const res = await fetch('http://localhost:8766/resources');
             maxResources = await res.json();
-            regResources.ram = maxResources.freeRam;
-            regResources.availableRam = maxResources.freeRam;
-            regResources.storage = maxResources.freeStorage;
-            regResources.availableStorage = maxResources.freeStorage;
-            regResources.gpu = maxResources.gpu;
+            // Fix: Ensure these are numbers, not strings
+            regResources.ram = parseInt(maxResources.freeRam) || 0;
+            regResources.availableRam = parseInt(maxResources.freeRam) || 0;
+            regResources.storage = parseInt(maxResources.freeStorage) || 0;
+            regResources.availableStorage = parseInt(maxResources.freeStorage) || 0;
+            regResources.gpu = maxResources.gpu || '';
         } catch {
-            maxResources = { ram: 0, storage: 0, gpu: '' };
+            maxResources = { ram: 0, storage: 0, gpu: '', cpuCores: 1, cpuThreads: 1 };
         }
     }
 
-    // Fetch registration info from backend and fill form
     async function fetchRegistration() {
         try {
             const res = await fetch('http://localhost:8766/registration');
@@ -270,14 +324,14 @@
                     gpu: regResources.gpu,
                     cpuShares: regResources.cpuShares,
                     nanoCpus: regResources.nanoCpus,
-                    cpuCores: maxResources.cpuCores,      // <-- ADD THIS
-                    cpuThreads: maxResources.cpuThreads   // <-- ADD THIS
+                    cpuCores: maxResources.cpuCores,
+                    cpuThreads: maxResources.cpuThreads
                 })
             });
             if (res.ok) {
                 regStatus = 'Registered successfully!';
                 isRegistered = true;
-                fetchRegistration(); // Refresh from DB
+                fetchRegistration();
             } else {
                 const data = await res.json();
                 regStatus = 'Failed: ' + (data.error || res.statusText);
@@ -294,7 +348,7 @@
             if (res.ok) {
                 regStatus = 'Deregistered!';
                 isRegistered = false;
-                fetchRegistration(); // Refresh from DB
+                fetchRegistration();
             } else {
                 regStatus = 'Failed to deregister';
             }
@@ -306,47 +360,80 @@
     let recommendedCpuShares = 0;
     let recommendedNanoCpus = 0;
 
-    $: recommendedCpuShares = cpuSlider * 1024;
-    $: recommendedNanoCpus = cpuSlider * 1_000_000_000;
+    $: {
+        recommendedCpuShares = cpuSlider * 1024;
+        recommendedNanoCpus = cpuSlider * 1_000_000_000;
+        // Update the actual resource values
+        regResources.cpuShares = recommendedCpuShares;
+        regResources.nanoCpus = recommendedNanoCpus;
+    }
 
     let selectedPeer = null;
     let resourceConfig = {
-        ram: 1024 * 1024 * 1024, // 1GB default
+        ram: 1024,
         cpu: 1,
         gpu: false
     };
-    let connectStep = ''; // '', 'requesting', 'accepted', 'deploying', 'connected', 'error'
-    let connectError = ''; // <-- Add this at the top with other lets
+    let connectStep = '';
+    let connectError = '';
 
     async function startPeerConnection() {
         if (!selectedPeer) return;
         connectStep = 'requesting';
-        connectError = ''; // Clear previous error
+        connectError = '';
+        
         try {
-            // Request container from the selected peer
+            console.log(`Attempting to connect to peer: ${selectedPeer}`);
+            console.log('Resource config:', resourceConfig);
+            
+            const requestBody = {
+                ram: resourceConfig.ram * 1024 * 1024,
+                cpu: resourceConfig.cpu,
+                gpu: resourceConfig.gpu
+            };
+            
+            console.log('Request body:', requestBody);
+            
             const res = await fetch(`http://localhost:8766/connect/${selectedPeer}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ram: resourceConfig.ram * 1024 * 1024, // Convert MB to bytes
-                    cpu: resourceConfig.cpu,
-                    gpu: resourceConfig.gpu
-                })
+                body: JSON.stringify(requestBody)
             });
-            if (!res.ok) throw new Error('Failed to connect to peer');
+            
+            console.log('Response status:', res.status);
+            console.log('Response ok:', res.ok);
+            
+            if (!res.ok) {
+                const errorText = await res.text();
+                console.error('Error response:', errorText);
+                
+                let errorMessage;
+                try {
+                    const errorJson = JSON.parse(errorText);
+                    errorMessage = errorJson.error || errorText;
+                } catch {
+                    errorMessage = errorText;
+                }
+                
+                throw new Error(`Server responded with ${res.status}: ${errorMessage}`);
+            }
+            
+            const responseData = await res.json();
+            console.log('Success response:', responseData);
+            
             connectStep = 'accepted';
-            // Wait for the container to be ready
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
             connectStep = 'deploying';
-            // Here you would typically deploy your application or run commands in the container
-            // For now, we just simulate it with a timeout
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
             connectStep = 'connected';
-            connectSocket(); // <-- Add this line
+            connectSocket();
+            
         } catch (e) {
+            console.error('Connection error:', e);
             connectStep = 'error';
-            connectError = e.message || 'Unknown error'; // <-- Set error message
-            console.error(e);
+            connectError = e.message || 'Unknown error';
         }
     }
 
@@ -379,7 +466,6 @@
         const res = await fetch('http://localhost:8766/reset_config', { method: 'POST' });
         if (res.ok) {
             const data = await res.json();
-            // Update form with returned config
             if (data.config) {
                 regResources.ram = data.config.totalRam || '';
                 regResources.availableRam = data.config.availableRam || '';
@@ -397,6 +483,17 @@
     }
 
     async function registerToSuperpeer() {
+        // Add validation
+        if (!peerName.trim()) {
+            regStatus = 'Failed: Peer name is required';
+            return;
+        }
+        
+        if (!regResources.ram || regResources.ram < 1024 * 1024 * 256) {
+            regStatus = 'Failed: RAM allocation must be at least 256MB';
+            return;
+        }
+        
         regStatus = 'Registering to superpeer...';
         const res = await fetch('http://localhost:8766/register_superpeer', {
             method: 'POST',
@@ -410,8 +507,8 @@
                 gpu: regResources.gpu,
                 cpuShares: regResources.cpuShares,
                 nanoCpus: regResources.nanoCpus,
-                cpuCores: maxResources.cpuCores,      // <-- ADD THIS
-                cpuThreads: maxResources.cpuThreads   // <-- ADD THIS
+                cpuCores: maxResources.cpuCores,
+                cpuThreads: maxResources.cpuThreads
             })
         });
         if (res.ok) {
@@ -432,553 +529,1051 @@
             regStatus = 'Failed to deregister from superpeer';
         }
     }
+
+    $: {
+        // Ensure available RAM doesn't exceed total RAM
+        if (regResources.availableRam > regResources.ram) {
+            regResources.availableRam = regResources.ram;
+        }
+        
+        // Ensure available storage doesn't exceed total storage
+        if (regResources.availableStorage > regResources.storage) {
+            regResources.availableStorage = regResources.storage;
+        }
+    }
+
+    // Add this function after the other async functions
+    async function debugPeerConnection() {
+        console.log('=== DEBUGGING PEER CONNECTION ===');
+        
+        // Check if current peer is registered
+        try {
+            const regRes = await fetch('http://localhost:8766/registration');
+            const regData = await regRes.json();
+            console.log('Current peer registration:', regData);
+        } catch (e) {
+            console.error('Failed to get registration:', e);
+        }
+        
+        // Check superpeer status
+        try {
+            const superRes = await fetch('http://localhost:8766/superpeer-status');
+            const superData = await superRes.json();
+            console.log('Superpeer status:', superData);
+        } catch (e) {
+            console.error('Failed to get superpeer status:', e);
+        }
+        
+        // Check available peers
+        try {
+            const peersRes = await fetch('http://localhost:8766/peers');
+            const peersData = await peersRes.json();
+            console.log('Available peers:', peersData);
+        } catch (e) {
+            console.error('Failed to get peers:', e);
+        }
+        
+        // Test direct superpeer connection
+        try {
+            const healthRes = await fetch('https://test.vardhin.tech/health');
+            const healthData = await healthRes.json();
+            console.log('Superpeer health:', healthData);
+        } catch (e) {
+            console.error('Failed to reach superpeer:', e);
+        }
+    }
 </script>
 
-<h1>Docker Container Console</h1>
+<div class="app-container">
+    <header class="app-header">
+        <h1><Rocket size="32" /> DE-Cloud Terminal</h1>
+        <div class="status-bar">
+            <div class="status-indicator {gunpeerStatus === 'Connected' ? 'online' : 'offline'}">
+                <span class="indicator-dot"></span>
+                Gunpeer: {gunpeerStatus}
+            </div>
+            <div class="status-indicator {superpeerConnected ? 'online' : 'offline'}">
+                <span class="indicator-dot"></span>
+                Superpeer: {superpeerConnected ? 'Connected' : 'Disconnected'}
+            </div>
+        </div>
+    </header>
 
-<div class="connection-status">
-    <span class="gunpeer-status">
-        <strong>Gunpeer Client:</strong>
-        {gunpeerStatus}
-    </span>
-    <span class="superpeer-status">
-        <strong>Superpeer:</strong>
-        {superpeerConnected
-            ? `Connected`
-            : `Not connected`}
-        {#if superpeerUrl}
-            &nbsp;|&nbsp;
-            <a href={superpeerUrl.replace(/\/gun$/, '')} target="_blank" rel="noopener">{superpeerUrl.replace(/\/gun$/, '')}</a>
-        {/if}
-    </span>
-</div>
-
-<div class="controls">
-    <button on:click={closeSession} disabled={!connected && !connecting}>Close</button>
-    <button on:click={reconnect} disabled={connected || connecting}>Reconnect</button>
-    <button on:click={copyOutput} title="Copy output" aria-label="Copy output">📋</button>
-</div>
-
-{#if connectStep === 'connected'}
-    <!-- Console UI here -->
-    <div class="console-container">
-        <div
-            class="console-output"
-            bind:this={outputDiv}
-            tabindex="0"
-            spellcheck="false"
-            aria-label="Terminal output"
-            aria-live="polite"
-            style="white-space: pre-wrap; overflow-y: auto; min-height: 20em; max-height: 30em;"
+    <nav class="tab-navigation">
+        <button 
+            class="tab-button {activeTab === 'console' ? 'active' : ''}"
+            on:click={() => activeTab = 'console'}
         >
-            {#if connecting}
-                <div class="spinner"></div>
-                <span class="connecting-msg">Connecting...</span>
-            {:else}
-                {@html output}
-            {/if}
-        </div>
-        <div class="console-input-line">
-            <span class="prompt">$</span>
-            <input
-                class="console-input"
-                type="text"
-                bind:value={command}
-                placeholder={connected ? "Type command and press Enter (Ctrl+K to focus)" : "Connect to start"}
-                on:keydown={handleKeydown}
-                on:focus={e => e.target.select()}
-                autocomplete="off"
-                spellcheck="false"
-                disabled={!connected}
-                bind:this={inputEl}
-            />
-            <button on:click={sendInput} disabled={!connected || connecting}>
-                {connecting ? '...' : 'Run'}
-            </button>
-        </div>
-    </div>
-{/if}
-
-{#if status}
-    <p class="status {connected ? 'ok' : connecting ? 'pending' : 'fail'}">
-        <strong>Status:</strong> {status}
-    </p>
-{/if}
-
-{#if showToast}
-    <div class="toast">Copied!</div>
-{/if}
-
-<h2>Available Peers</h2>
-{#if peers.length === 0}
-    <p>No active peers found.</p>
-{:else}
-    <table class="peers-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Total RAM</th>
-                <th>Available RAM</th>
-                <th>Total Storage</th>
-                <th>Available Storage</th>
-                <th>GPU</th>
-                <th>Last Seen</th>
-            </tr>
-        </thead>
-        <tbody>
-            {#each peers as peer}
-                <tr>
-                    <td>{peer.name}</td>
-                    <td>{formatBytes(peer.totalRam)}</td>
-                    <td>{formatBytes(peer.availableRam)}</td>
-                    <td>{formatBytes(peer.totalStorage)}</td>
-                    <td>{formatBytes(peer.availableStorage)}</td>
-                    <td>{peer.gpu}</td>
-                    <td>{formatTimeAgo(peer.lastSeen)}</td>
-                </tr>
-            {/each}
-        </tbody>
-    </table>
-{/if}
-
-<h2>Peer Registration</h2>
-<div class="peer-config">
-    <label>
-        Peer Name:
-        <input type="text" bind:value={peerName} placeholder="Enter peer name" />
-    </label>
-    <label>
-        Max RAM: <span>{formatBytes(regResources.ram)}</span>
-        <input
-            type="range"
-            min={1024 * 1024 * 256}
-            max={maxResources.freeRam}
-            step={1024 * 1024 * 256}
-            bind:value={regResources.ram}
-            on:input={() => {
-                if (regResources.availableRam > regResources.ram) {
-                    regResources.availableRam = regResources.ram;
-                }
-            }}
-        />
-        <span>{(regResources.ram / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
-    </label>
-    <label>
-        Available RAM:
-        <input
-            type="range"
-            min={1024 * 1024 * 256}
-            max={regResources.ram}
-            step={1024 * 1024 * 256}
-            bind:value={regResources.availableRam}
-        />
-        <span>{(regResources.availableRam / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
-    </label>
-    <label>
-        Max Storage: <span>{formatBytes(regResources.storage)}</span>
-        <input
-            type="range"
-            min={1024 * 1024 * 256}
-            max={maxResources.freeStorage}
-            step={1024 * 1024 * 256}
-            bind:value={regResources.storage}
-            on:input={() => {
-                // If availableStorage > storage, clamp it
-                if (regResources.availableStorage > regResources.storage) {
-                    regResources.availableStorage = regResources.storage;
-                }
-            }}
-        />
-        <span>{(regResources.storage / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
-    </label>
-    <label>
-        Available Storage:
-        <input
-            type="range"
-            min={1024 * 1024 * 256}
-            max={regResources.storage}
-            step={1024 * 1024 * 256}
-            bind:value={regResources.availableStorage}
-        />
-        <span>{(regResources.availableStorage / (1024 * 1024 * 1024)).toFixed(2)} GB</span>
-    </label>
-    <label>
-        GPU: <span>{maxResources.gpu}</span>
-        <input type="text" bind:value={regResources.gpu} />
-    </label>
-    <label>
-        CPU Shares:
-        <input
-            type="range"
-            min="2"
-            max="1024"
-            step="2"
-            bind:value={regResources.cpuShares}
-        />
-        <span>{regResources.cpuShares}</span>
-        <button type="button" on:click={() => regResources.cpuShares = recommendedCpuShares}>
-            Set recommended ({recommendedCpuShares})
+            <Terminal size="16" /> Console
         </button>
-        <div class="cpu-help">
-            <small>
-                <b>What is a CPU Share?</b> Docker uses CPU shares to proportionally allocate CPU time between containers. Default is 1024 per core.<br>
-            </small>
-        </div>
-    </label>
-    <label>
-        NanoCPUs:
-        <input
-            type="range"
-            min="0"
-            max={maxResources.cpuCores * 1_000_000_000}
-            step="250000000"
-            bind:value={regResources.nanoCpus}
-        />
-        <span>{(regResources.nanoCpus / 1_000_000_000).toFixed(2)} CPU(s)</span>
-        <button type="button" on:click={() => regResources.nanoCpus = recommendedNanoCpus}>
-            Set recommended ({(recommendedNanoCpus / 1_000_000_000).toFixed(2)} CPU)
+        <button 
+            class="tab-button {activeTab === 'peers' ? 'active' : ''}"
+            on:click={() => activeTab = 'peers'}
+        >
+            <Globe size="16" /> Peers
         </button>
-        <div class="cpu-help">
-            <small>
-                <b>What is a NanoCPU?</b> 1 NanoCPU = 1 billionth of a CPU core. 2 CPUs = 2,000,000,000 NanoCPUs. This is a fine-grained way to limit CPU usage.
-            </small>
-        </div>
-    </label>
-    <label>
-        CPU Cores: <span>{cpuSlider} / {maxResources.cpuCores}</span>
-        <input
-            type="range"
-            min="1"
-            max={maxResources.cpuCores}
-            step="1"
-            bind:value={cpuSlider}
-            on:input={() => {
-                regResources.cpuShares = recommendedCpuShares;
-                regResources.nanoCpus = recommendedNanoCpus;
-            }}
-        />
-        <span>{cpuSlider} core(s) selected</span>
-        <div class="cpu-help">
-            <small>
-                <b>What is a CPU core?</b> Each core can run one task at a time.<br>
-                <b>CPU Shares</b> are Docker's way to share CPU between containers.<br>
-                <b>NanoCPUs</b> is a fine-grained way to limit CPU (1 core = 1,000,000,000 NanoCPUs).
-            </small>
-        </div>
-    </label>
-    <div class="peer-actions">
-        <button on:click={saveConfig}>Save Config</button>
-        <button on:click={resetConfig}>Reset Config</button>
-        <button on:click={registerToSuperpeer} disabled={!peerName}>Register to Superpeer</button>
-        <button on:click={deregisterFromSuperpeer} disabled={!isRegistered}>Deregister from Superpeer</button>
-    </div>
-    {#if regStatus}
-        <div class="reg-status">{regStatus}</div>
-    {/if}
-</div>
+        <button 
+            class="tab-button {activeTab === 'register' ? 'active' : ''}"
+            on:click={() => activeTab = 'register'}
+        >
+            <Settings size="16" /> Register
+        </button>
+        <button 
+            class="tab-button {activeTab === 'connect' ? 'active' : ''}"
+            on:click={() => activeTab = 'connect'}
+        >
+            <Link size="16" /> Connect
+        </button>
+    </nav>
 
-<h2>Connect to Peer</h2>
-<div>
-    <label>
-        Select Peer:
-        <select bind:value={selectedPeer}>
-            <option value="">-- Select --</option>
-            {#each peers as peer}
-                <option value={peer.name}>{peer.name}</option>
-            {/each}
-        </select>
-    </label>
-    <label>
-        RAM (MB):
-        <input type="number" min="256" step="256" bind:value={resourceConfig.ram} />
-    </label>
-    <label>
-        CPU Cores:
-        <input type="number" min="1" max="16" bind:value={resourceConfig.cpu} />
-    </label>
-    <label>
-        GPU:
-        <input type="checkbox" bind:checked={resourceConfig.gpu} />
-    </label>
-    <button on:click={startPeerConnection} disabled={!selectedPeer || connectStep === 'requesting'}>
-        Connect
-    </button>
-    {#if connectStep}
-        <div>
-            {#if connectStep === 'requesting'}Requesting container from {selectedPeer}...{/if}
-            {#if connectStep === 'accepted'}Peer accepted, deploying container...{/if}
-            {#if connectStep === 'deploying'}Container deploying...{/if}
-            {#if connectStep === 'connected'}Connected! Console ready.{/if}
-            {#if connectStep === 'error'}<span style="color:red">{connectError}</span>{/if}
+    <main class="main-content">
+        {#if activeTab === 'console'}
+            <div class="tab-content">
+                <div class="card">
+                    <h2>Terminal Console</h2>
+                    
+                    {#if connectStep !== 'connected'}
+                        <div class="info-box">
+                            <p><Rocket size="20" /> Connect to a peer to start using the terminal</p>
+                            <button class="btn btn-primary" on:click={() => activeTab = 'connect'}>
+                                Connect to Peer
+                            </button>
+                        </div>
+                    {:else}
+                        <div class="terminal-actions">
+                            <button class="btn btn-sm" on:click={copyOutput} title="Copy output">
+                                <Copy size="16" /> Copy
+                            </button>
+                            <button class="btn btn-sm" on:click={() => output = ''} title="Clear output">
+                                <Trash2 size="16" /> Clear
+                            </button>
+                            <button class="btn btn-sm btn-danger" on:click={closeSession} disabled={!connected && !connecting}>
+                                <Square size="16" /> Close
+                            </button>
+                        </div>
+
+                        <div class="terminal-container">
+                            <div class="terminal-output" bind:this={outputDiv}>
+                                {#if connecting}
+                                    <div class="loading">
+                                        <Loader2 size="24" class="spinner" />
+                                        <span>Connecting to terminal...</span>
+                                    </div>
+                                {:else}
+                                    {@html output}
+                                {/if}
+                            </div>
+                            
+                            <div class="terminal-input-line">
+                                <span class="prompt">$</span>
+                                <input
+                                    class="terminal-input"
+                                    type="text"
+                                    bind:value={command}
+                                    placeholder={connected ? "Enter command..." : "Not connected"}
+                                    on:keydown={handleKeydown}
+                                    disabled={!connected}
+                                    bind:this={inputEl}
+                                />
+                                <button class="btn btn-primary" on:click={sendInput} disabled={!connected}>
+                                    <Play size="16" /> Run
+                                </button>
+                            </div>
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+
+        {#if activeTab === 'peers'}
+            <div class="tab-content">
+                <div class="card">
+                    <h2>Available Peers</h2>
+                    
+                    {#if peers.length === 0}
+                        <div class="empty-state">
+                            <Search size="48" />
+                            <p>No peers available</p>
+                            <small>Peers will appear here when they register on the network</small>
+                        </div>
+                    {:else}
+                        <div class="peers-grid">
+                            {#each peers as peer}
+                                <div class="peer-card">
+                                    <div class="peer-header">
+                                        <h3>{peer.name}</h3>
+                                        <span class="peer-status online">Online</span>
+                                    </div>
+                                    <div class="peer-stats">
+                                        <div class="stat">
+                                            <span class="stat-label"><HardDrive size="12" /> RAM</span>
+                                            <span class="stat-value">{formatBytes(peer.availableRam)} / {formatBytes(peer.totalRam)}</span>
+                                        </div>
+                                        <div class="stat">
+                                            <span class="stat-label"><HardDrive size="12" /> Storage</span>
+                                            <span class="stat-value">{formatBytes(peer.availableStorage)} / {formatBytes(peer.totalStorage)}</span>
+                                        </div>
+                                        <div class="stat">
+                                            <span class="stat-label"><Zap size="12" /> GPU</span>
+                                            <span class="stat-value">{peer.gpu || 'None'}</span>
+                                        </div>
+                                        <div class="stat">
+                                            <span class="stat-label"><Clock size="12" /> Last Seen</span>
+                                            <span class="stat-value">{formatTimeAgo(peer.lastSeen)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+
+        {#if activeTab === 'register'}
+            <div class="tab-content">
+                <div class="card">
+                    <h2>Peer Registration</h2>
+                    
+                    <div class="form-section">
+                        <label class="form-label">
+                            Peer Name
+                            <input class="form-input" type="text" bind:value={peerName} placeholder="Enter your peer name" />
+                        </label>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Resource Configuration</h3>
+                        
+                        <div class="resource-group">
+                            <label class="form-label">
+                                <HardDrive size="16" /> RAM Allocation: {formatBytes(regResources.ram)}
+                                <input
+                                    class="form-range"
+                                    type="range"
+                                    min={1024 * 1024 * 256}
+                                    max={maxResources.freeRam}
+                                    step={1024 * 1024 * 256}
+                                    bind:value={regResources.ram}
+                                />
+                                <div class="range-labels">
+                                    <span>256 MB</span>
+                                    <span>{formatBytes(maxResources.freeRam)}</span>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div class="resource-group">
+                            <label class="form-label">
+                                <HardDrive size="16" /> Available RAM: {formatBytes(regResources.availableRam)}
+                                <input
+                                    class="form-range"
+                                    type="range"
+                                    min={1024 * 1024 * 256}
+                                    max={regResources.ram}
+                                    step={1024 * 1024 * 256}
+                                    bind:value={regResources.availableRam}
+                                />
+                            </label>
+                        </div>
+
+                        <div class="resource-group">
+                            <label class="form-label">
+                                <HardDrive size="16" /> Storage Allocation: {formatBytes(regResources.storage)}
+                                <input
+                                    class="form-range"
+                                    type="range"
+                                    min={1024 * 1024 * 256}
+                                    max={maxResources.freeStorage}
+                                    step={1024 * 1024 * 256}
+                                    bind:value={regResources.storage}
+                                />
+                            </label>
+                        </div>
+
+                        <div class="resource-group">
+                            <label class="form-label">
+                                <Cpu size="16" /> CPU Cores: {cpuSlider} / {maxResources.cpuCores}
+                                <input
+                                    class="form-range"
+                                    type="range"
+                                    min="1"
+                                    max={maxResources.cpuCores}
+                                    step="1"
+                                    bind:value={cpuSlider}
+                                />
+                            </label>
+                        </div>
+
+                        <div class="resource-group">
+                            <label class="form-label">
+                                <Zap size="16" /> GPU
+                                <input class="form-input" type="text" bind:value={regResources.gpu} placeholder="GPU model (optional)" />
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" on:click={saveConfig}>
+                            <Save size="16" /> Save Config
+                        </button>
+                        <button class="btn btn-secondary" on:click={resetConfig}>
+                            <RotateCcw size="16" /> Reset
+                        </button>
+                        <button class="btn btn-primary" on:click={registerToSuperpeer} disabled={!peerName}>
+                            <Radio size="16" /> Register to Network
+                        </button>
+                        {#if isRegistered}
+                            <button class="btn btn-danger" on:click={deregisterFromSuperpeer}>
+                                <UserX size="16" /> Deregister
+                            </button>
+                        {/if}
+                    </div>
+
+                    {#if regStatus}
+                        <div class="status-message {regStatus.includes('Failed') ? 'error' : 'success'}">
+                            {#if regStatus.includes('Failed')}
+                                <AlertCircle size="16" />
+                            {:else}
+                                <CheckCircle size="16" />
+                            {/if}
+                            {regStatus}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+
+        {#if activeTab === 'connect'}
+            <div class="tab-content">
+                <div class="card">
+                    <h2>Connect to Peer</h2>
+                    
+                    {#if peers.length === 0}
+                        <div class="empty-state">
+                            <Search size="48" />
+                            <p>No peers available to connect to</p>
+                            <small>Make sure peers are registered and online</small>
+                        </div>
+                    {:else}
+                        <div class="connect-form">
+                            <div class="form-section">
+                                <label class="form-label">
+                                    Select Peer
+                                    <select class="form-select" bind:value={selectedPeer}>
+                                        <option value="">-- Choose a peer --</option>
+                                        {#each peers as peer}
+                                            <option value={peer.name}>{peer.name}</option>
+                                        {/each}
+                                    </select>
+                                </label>
+                            </div>
+
+                            <div class="form-section">
+                                <h3>Resource Requirements</h3>
+                                
+                                <div class="resource-grid">
+                                    <label class="form-label">
+                                        <HardDrive size="16" /> RAM (MB)
+                                        <input class="form-input" type="number" min="256" step="256" bind:value={resourceConfig.ram} />
+                                    </label>
+                                    
+                                    <label class="form-label">
+                                        <Cpu size="16" /> CPU Cores
+                                        <input class="form-input" type="number" min="1" max="16" bind:value={resourceConfig.cpu} />
+                                    </label>
+                                    
+                                    <label class="form-label checkbox-label">
+                                        <input type="checkbox" bind:checked={resourceConfig.gpu} />
+                                        <Zap size="16" /> Require GPU
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="form-actions">
+                                <button 
+                                    class="btn btn-primary btn-large"
+                                    on:click={startPeerConnection} 
+                                    disabled={!selectedPeer || connectStep === 'requesting'}
+                                >
+                                    {#if connectStep === 'requesting'}
+                                        <Loader2 size="16" class="spinner-sm" />
+                                        Connecting...
+                                    {:else}
+                                        <Rocket size="16" /> Connect to Peer
+                                    {/if}
+                                </button>
+                                
+                                <!-- Add debug button -->
+                                <button class="btn btn-secondary" on:click={debugPeerConnection}>
+                                    Debug Connection
+                                </button>
+                            </div>
+
+                            {#if connectStep && connectStep !== 'requesting'}
+                                <div class="connection-progress">
+                                    <div class="progress-steps">
+                                        <div class="step {connectStep === 'accepted' || connectStep === 'deploying' || connectStep === 'connected' ? 'completed' : ''}">
+                                            <Check size="16" /> Request Accepted
+                                        </div>
+                                        <div class="step {connectStep === 'deploying' || connectStep === 'connected' ? 'completed' : ''}">
+                                            <Settings size="16" /> Container Deploying
+                                        </div>
+                                        <div class="step {connectStep === 'connected' ? 'completed' : ''}">
+                                            <CheckCircle size="16" /> Connected!
+                                        </div>
+                                    </div>
+                                    
+                                    {#if connectStep === 'error'}
+                                        <div class="error-message">
+                                            <X size="16" /> Connection failed: {connectError}
+                                        </div>
+                                    {/if}
+                                </div>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        {/if}
+    </main>
+
+    {#if showToast}
+        <div class="toast">
+            <CheckCircle size="16" /> Copied to clipboard!
         </div>
     {/if}
-</div>
-
-<div class="summary">
-    <b>Your System:</b>
-    <ul>
-        <li>Total RAM: {formatBytes(maxResources.ram)}</li>
-        <li>Free RAM: {formatBytes(maxResources.freeRam)}</li>
-        <li>Total Storage: {formatBytes(maxResources.storage)}</li>
-        <li>Free Storage: {formatBytes(maxResources.freeStorage)}</li>
-        <li>CPU: {maxResources.cpuCores} cores / {maxResources.cpuThreads} threads</li>
-    </ul>
 </div>
 
 <style>
-.console-container {
-    background: #181818;
-    color: #e0e0e0;
-    padding: 1.5em;
-    border-radius: 10px;
-    width: 100%;
-    max-width: 800px;
-    margin: 2em auto 0 auto;
-    font-family: 'Fira Mono', 'Consolas', monospace;
-    box-shadow: 0 2px 16px #0004;
-    border: 1.5px solid #222;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-}
-@media (max-width: 900px) {
-    .console-container {
-        max-width: 98vw;
+    /* Global Reset */
+    :global(html) {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        height: 100%;
     }
-    .console-output {
-        min-height: 10em;
-        max-height: 30vh;
-        font-size: 0.98em;
+
+    :global(body) {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        height: 100%;
     }
-}
-@media (max-width: 600px) {
-    .console-container {
-        padding: 0.5em;
-        max-width: 100vw;
-    }
-    .console-output {
-        min-height: 7em;
-        max-height: 20vh;
-        font-size: 0.95em;
-        padding: 0.4em;
-    }
-    .console-input-line {
-        padding: 0.4em;
-    }
-}
-.console-output {
-    width: 100%;
-    background: #181818;
-    color: #e0e0e0;
-    border: 1.5px solid #222;
-    font-family: inherit;
-    font-size: 1.08em;
-    margin-bottom: 0;
-    outline: none;
-    min-height: 20em;
-    max-height: 40vh;
-    overflow-y: auto;
-    border-radius: 6px 6px 0 0;
-    padding: 0.7em;
-    position: relative;
-    box-sizing: border-box;
-}
-.console-output::after {
-    content: '';
-    display: inline-block;
-    width: 0.7em;
-    height: 1.1em;
-    background: #00ff00;
-    margin-left: 0.2em;
-    vertical-align: middle;
-    animation: blink 1s steps(1) infinite;
-}
-@keyframes blink {
-    0%, 50% { opacity: 1; }
-    51%, 100% { opacity: 0; }
-}
-.console-output:focus, .console-input:focus {
-    outline: 2px solid #00ff00;
-    outline-offset: 2px;
-}
-.console-input-line {
-    display: flex;
-    align-items: center;
-    gap: 0.7em;
-    background: #181818;
-    border: 1.5px solid #222;
-    border-top: none;
-    border-radius: 0 0 6px 6px;
-    padding: 0.7em;
-    width: 100%;
-    box-sizing: border-box;
-}
-.prompt {
-    color: #00ff00;
+    :global(.user-cmd) {
+    color: #00f5ff;
     font-weight: bold;
 }
-.console-input {
-    flex: 1;
-    background: #222;
-    color: #e0e0e0;
-    border: 1px solid #333;
-    font-family: inherit;
-    font-size: 1.08em;
-    outline: none;
-    border-radius: 4px;
-    padding: 0.3em 0.7em;
-    transition: border 0.2s;
-    min-width: 0;
-}
-.console-input:focus {
-    border: 1.5px solid #00ff00;
-}
-.console-input::placeholder {
-    color: #888;
-}
-button {
-    margin-left: 0;
-    background: #222;
-    color: #e0e0e0;
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 0.4em 1em;
-    cursor: pointer;
-    transition: background 0.2s, border 0.2s;
-    font-size: 1em;
-}
-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-button:not(:disabled):hover {
-    background: #333;
-    border: 1.5px solid #00ff00;
-}
-.controls {
-    display: flex;
-    gap: 0.7em;
-    margin-bottom: 0.7em;
-}
-.status {
-    margin-top: 1em;
-    font-size: 1.15em;
-    padding: 0.4em 0.9em;
-    border-radius: 5px;
-    display: inline-block;
-}
-.status.ok { background: #1a3; color: #fff; }
-.status.fail { background: #a33; color: #fff; }
-.status.pending { background: #333; color: #ff0; }
-.user-cmd {
-    color: #00ff00;
-    font-weight: bold;
-}
-.spinner {
-    display: inline-block;
-    width: 1.2em;
-    height: 1.2em;
-    border: 3px solid #444;
-    border-top: 3px solid #00ff00;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    vertical-align: middle;
-    margin-right: 0.5em;
-}
-.connecting-msg {
-    color: #ff0;
-    font-size: 1.1em;
-    margin-left: 0.5em;
-}
-@keyframes spin {
-    0% { transform: rotate(0deg);}
-    100% { transform: rotate(360deg);}
-}
-.toast {
-    position: fixed;
-    bottom: 2em;
-    right: 2em;
-    background: #222;
-    color: #00ff00;
-    padding: 0.7em 1.2em;
-    border-radius: 6px;
-    box-shadow: 0 2px 8px #0007;
-    font-size: 1.1em;
-    z-index: 1000;
-    animation: fadein 0.2s, fadeout 0.5s 1s;
-}
-@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
-@keyframes fadeout { from { opacity: 1; } to { opacity: 0; } }
-.peers-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 2em 0 1em 0;
-    background: #181818;
-    color: #e0e0e0;
-    font-size: 1em;
-    border-radius: 8px;
-    overflow: hidden;
-    box-shadow: 0 2px 8px #0003;
-}
-.peers-table th, .peers-table td {
-    border: 1px solid #222;
-    padding: 0.5em 1em;
-    text-align: left;
-}
-.peers-table th {
-    background: #222;
-    color: #00ff00;
-    font-weight: bold;
-}
-.peers-table tr:nth-child(even) {
-    background: #202020;
-}
-.peers-table tr:hover {
-    background: #222;
-}
-.connection-status {
-    margin: 1em 0 1.5em 0;
-    font-size: 1.08em;
-    display: flex;
-    gap: 2em;
-    align-items: center;
-}
-.gunpeer-status {
-    color: #00ff00;
-}
-.superpeer-status {
-    color: #00e0ff;
-}
-.peer-config {
-    background: #222;
-    color: #e0e0e0;
-    padding: 1em;
-    border-radius: 8px;
-    margin: 2em 0;
-    max-width: 500px;
-}
-.peer-config label {
-    display: flex;
-    flex-direction: column;
-    margin-bottom: 1em;
-    font-size: 1.05em;
-}
-.peer-config input[type="number"], .peer-config input[type="text"] {
-    margin-top: 0.3em;
-    padding: 0.3em;
-    border-radius: 4px;
-    border: 1px solid #444;
-    background: #181818;
-    color: #e0e0e0;
-}
-.peer-actions {
-    display: flex;
-    gap: 1em;
-    margin-top: 1em;
-}
-.reg-status {
-    margin-top: 1em;
-    color: #00ff00;
-    font-weight: bold;
-}
+    :global(*) {
+        box-sizing: border-box;
+    }
+
+    .app-container {
+        min-height: 100vh;
+        width: 100vw;
+        margin: 0;
+        padding: 0;
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        color: #ffffff;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        position: relative;
+    }
+
+    /* Header */
+    .app-header {
+        background: rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(10px);
+        padding: 1.5rem 2rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .app-header h1 {
+        margin: 0 0 1rem 0;
+        font-size: 2.5rem;
+        font-weight: 700;
+        background: linear-gradient(45deg, #00f5ff, #00d4ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .status-bar {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+    }
+
+    .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border-radius: 2rem;
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(5px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .indicator-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ff6b6b;
+        animation: pulse 2s infinite;
+    }
+
+    .status-indicator.online .indicator-dot {
+        background: #51cf66;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+
+    /* Navigation */
+    .tab-navigation {
+        display: flex;
+        background: rgba(0, 0, 0, 0.1);
+        padding: 0 2rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        overflow-x: auto;
+    }
+
+    .tab-button {
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.7);
+        padding: 1rem 1.5rem;
+        cursor: pointer;
+        font-size: 1rem;
+        font-weight: 500;
+        border-bottom: 3px solid transparent;
+        transition: all 0.3s ease;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .tab-button:hover {
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.1);
+    }
+
+    .tab-button.active {
+        color: #00f5ff;
+        border-bottom-color: #00f5ff;
+        background: rgba(0, 245, 255, 0.1);
+    }
+
+    /* Main Content */
+    .main-content {
+        padding: 2rem;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    .tab-content {
+        animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    .card {
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(10px);
+        border-radius: 1rem;
+        padding: 2rem;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .card h2 {
+        margin: 0 0 1.5rem 0;
+        font-size: 1.8rem;
+        color: #ffffff;
+    }
+
+    /* Buttons */
+    .btn {
+        background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
+        color: #ffffff;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 0.5rem;
+        cursor: pointer;
+        font-size: 1rem;
+        font-weight: 500;
+        transition: all 0.3s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    .btn-primary {
+        background: linear-gradient(45deg, #00f5ff, #00d4ff);
+    }
+
+    .btn-secondary {
+        background: linear-gradient(45deg, #a8edea, #fed6e3);
+        color: #333;
+    }
+
+    .btn-danger {
+        background: linear-gradient(45deg, #ff6b6b, #ee5a52);
+    }
+
+    .btn-sm {
+        padding: 0.5rem 1rem;
+        font-size: 0.875rem;
+    }
+
+    .btn-large {
+        padding: 1rem 2rem;
+        font-size: 1.1rem;
+    }
+
+    /* Terminal */
+    .terminal-container {
+        background: #1a1a1a;
+        border-radius: 0.5rem;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        margin-top: 1rem;
+    }
+
+    .terminal-output {
+        background: #1a1a1a;
+        color: #e0e0e0;
+        padding: 1rem;
+        min-height: 300px;
+        max-height: 400px;
+        overflow-y: auto;
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+        font-size: 0.9rem;
+        line-height: 1.4;
+        white-space: pre-wrap;
+    }
+
+    .terminal-input-line {
+        background: #222;
+        padding: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .prompt {
+        color: #00f5ff;
+        font-weight: bold;
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    }
+
+    .terminal-input {
+        flex: 1;
+        background: #333;
+        color: #e0e0e0;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 0.5rem;
+        border-radius: 0.25rem;
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    }
+
+    .terminal-input:focus {
+        outline: none;
+        border-color: #00f5ff;
+    }
+
+    .terminal-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+
+    /* Forms */
+    .form-section {
+        margin-bottom: 2rem;
+    }
+
+    .form-section h3 {
+        margin: 0 0 1rem 0;
+        color: #00f5ff;
+        font-size: 1.3rem;
+    }
+
+    .form-label {
+        display: block;
+        margin-bottom: 1rem;
+        font-weight: 500;
+        color: #ffffff;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .form-label > span:first-child {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .form-input, .form-select {
+        width: 100%;
+        padding: 0.75rem;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 0.5rem;
+        background: rgba(255, 255, 255, 0.1);
+        color: #ffffff;
+        font-size: 1rem;
+    }
+
+    .form-input:focus, .form-select:focus {
+        outline: none;
+        border-color: #00f5ff;
+        box-shadow: 0 0 0 2px rgba(0, 245, 255, 0.2);
+    }
+
+    .form-range {
+        width: 100%;
+        margin-top: 0.5rem;
+        appearance: none;
+        height: 6px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 3px;
+        outline: none;
+    }
+
+    .form-range::-webkit-slider-thumb {
+        appearance: none;
+        width: 20px;
+        height: 20px;
+        background: #00f5ff;
+        border-radius: 50%;
+        cursor: pointer;
+    }
+
+    .form-range::-moz-range-thumb {
+        width: 20px;
+        height: 20px;
+        background: #00f5ff;
+        border-radius: 50%;
+        cursor: pointer;
+        border: none;
+    }
+
+    .range-labels {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 0.25rem;
+        font-size: 0.8rem;
+        color: rgba(255, 255, 255, 0.7);
+    }
+
+    .form-actions {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin-top: 2rem;
+    }
+
+    .resource-group {
+        margin-bottom: 1.5rem;
+    }
+
+    .resource-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+    }
+
+    .checkbox-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+    }
+
+    .checkbox-label input[type="checkbox"] {
+        width: auto;
+        margin: 0;
+    }
+
+    /* Peers */
+    .peers-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 1.5rem;
+        margin-top: 1rem;
+    }
+
+    .peer-card {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.75rem;
+        padding: 1.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        transition: transform 0.2s ease;
+    }
+
+    .peer-card:hover {
+        transform: translateY(-2px);
+    }
+
+    .peer-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+
+    .peer-header h3 {
+        margin: 0;
+        color: #ffffff;
+    }
+
+    .peer-status {
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.8rem;
+        font-weight: 500;
+    }
+
+    .peer-status.online {
+        background: rgba(81, 207, 102, 0.2);
+        color: #51cf66;
+        border: 1px solid #51cf66;
+    }
+
+    .peer-stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+    }
+
+    .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .stat-label {
+        font-size: 0.8rem;
+        color: rgba(255, 255, 255, 0.7);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+    }
+
+    .stat-value {
+        font-weight: 600;
+        color: #ffffff;
+    }
+
+    /* Connection Progress */
+    .connection-progress {
+        margin-top: 2rem;
+        padding: 1.5rem;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .progress-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .step {
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        background: rgba(255, 255, 255, 0.1);
+        opacity: 0.5;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .step.completed {
+        opacity: 1;
+        background: rgba(81, 207, 102, 0.2);
+        color: #51cf66;
+    }
+
+    /* Messages */
+    .status-message {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-top: 1rem;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .status-message.success {
+        background: rgba(81, 207, 102, 0.2);
+        color: #51cf66;
+        border: 1px solid #51cf66;
+    }
+
+    .status-message.error {
+        background: rgba(255, 107, 107, 0.2);
+        color: #ff6b6b;
+        border: 1px solid #ff6b6b;
+    }
+
+    .error-message {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background: rgba(255, 107, 107, 0.2);
+        color: #ff6b6b;
+        border: 1px solid #ff6b6b;
+        margin-top: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    /* Empty States */
+    .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: rgba(255, 255, 255, 0.7);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+    }
+
+    .empty-state p {
+        font-size: 1.2rem;
+        margin: 0;
+    }
+
+    .info-box {
+        text-align: center;
+        padding: 2rem;
+        background: rgba(0, 245, 255, 0.1);
+        border-radius: 0.75rem;
+        border: 1px solid rgba(0, 245, 255, 0.3);
+    }
+
+    .info-box p {
+        margin-bottom: 1rem;
+        font-size: 1.1rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+
+    /* Loading */
+    .loading {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 2rem;
+        justify-content: center;
+    }
+
+    :global(.spinner) {
+        animation: spin 1s linear infinite;
+    }
+
+    :global(.spinner-sm) {
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
+    /* Toast */
+    .toast {
+        position: fixed;
+        bottom: 2rem;
+        right: 2rem;
+        background: rgba(0, 0, 0, 0.9);
+        color: #ffffff;
+        padding: 1rem 1.5rem;
+        border-radius: 0.5rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        z-index: 1000;
+        animation: slideIn 0.3s ease, slideOut 0.3s ease 2s forwards;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    @keyframes slideIn {
+        from { transform: translateX(100%); }
+        to { transform: translateX(0); }
+    }
+
+    @keyframes slideOut {
+        from { transform: translateX(0); }
+        to { transform: translateX(100%); }
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .app-header {
+            padding: 1rem;
+        }
+        
+        .app-header h1 {
+            font-size: 2rem;
+        }
+        
+        .main-content {
+            padding: 1rem;
+        }
+        
+        .card {
+            padding: 1.5rem;
+        }
+        
+        .status-bar {
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .form-actions {
+            flex-direction: column;
+        }
+        
+        .peers-grid {
+            grid-template-columns: 1fr;
+        }
+        
+        .resource-grid {
+            grid-template-columns: 1fr;
+        }
+    }
 </style>
