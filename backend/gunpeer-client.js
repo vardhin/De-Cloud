@@ -1201,7 +1201,11 @@ app.delete('/database/:dbName/table/:tableName', async (req, res) => {
     const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/table/${tableName}`, {
       method: 'DELETE'
     });
-    const data = await response.json();
+    let data = await response.json();
+    // Fix message if needed
+    if (data && data.success && data.message && data.message.includes('Record deleted')) {
+      data.message = `Table ${tableName} deleted successfully`;
+    }
     res.status(response.status).json(data);
   } catch (error) {
     res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
@@ -1217,7 +1221,14 @@ app.put('/database/:dbName/table/:tableName/rename', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    const data = await response.json();
+    // Ensure response is JSON
+    const contentType = response.headers.get('content-type');
+    let data;
+    if (contentType && contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      data = { error: await response.text() };
+    }
     res.status(response.status).json(data);
   } catch (error) {
     res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
