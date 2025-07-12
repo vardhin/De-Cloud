@@ -1,24 +1,11 @@
 <script>
     import { onMount } from 'svelte';
     import { DatabaseManager } from '../../lib/database.js';
-    import { v4 as uuidv4 } from 'uuid'; // Add this import
-    
-    import { 
-        Database, 
-        Plus, 
-        Edit, 
-        Trash2, 
-        Save, 
-        X,
-        Search,
-        Download,
-        Upload,
-        Table,
-        FileText,
-        FolderOpen,
-        Import
+    import { v4 as uuidv4 } from 'uuid';
+    import {
+        Database, Plus, Edit, Trash2, Save, X, Search, Download, Table, FolderOpen, Import
     } from 'lucide-svelte';
-    
+
     let databaseManager = new DatabaseManager();
     let databases = [];
     let selectedDatabase = null;
@@ -37,7 +24,8 @@
     let itemsPerPage = 10;
     let isLoading = false;
     let statusMessage = '';
-    
+    let showStatusToast = false;
+
     // Database creation variables
     let newDatabaseName = '';
     let selectedSchema = null;
@@ -45,16 +33,21 @@
     let requestedSpace = 1024 * 1024 * 1024; // 1GB default
     let importFile = null;
     let importedSchema = null;
-    
+
     // Schema creation method
     let schemaCreationMethod = 'existing'; // 'existing' or 'import'
-    
-    // Add new variables for table creation
+
+    // Table creation
     let showAddTableModal = false;
     let newTableName = '';
     let newTableColumns = [];
     let newTableColumn = { name: '', type: 'VARCHAR', length: 255 };
-    
+
+    // Table rename
+    let showRenameTableModal = false;
+    let renameTableOldName = '';
+    let renameTableNewName = '';
+
     // MySQL data types
     const mysqlTypes = [
         { value: 'VARCHAR', label: 'VARCHAR', hasLength: true, defaultLength: 255 },
@@ -66,46 +59,44 @@
         { value: 'BOOLEAN', label: 'BOOLEAN', hasLength: false },
         { value: 'TIMESTAMP', label: 'TIMESTAMP', hasLength: false }
     ];
-    
+
     function setupCallbacks() {
         databaseManager.setCallbacks({
             onStatusChange: (message) => {
                 statusMessage = message;
-                setTimeout(() => statusMessage = '', 5000);
+                showStatusToast = true;
+                setTimeout(() => showStatusToast = false, 4000);
             },
             onError: (error) => {
-                console.error('Database error:', error);
                 statusMessage = 'Error: ' + error;
-                setTimeout(() => statusMessage = '', 5000);
+                showStatusToast = true;
+                setTimeout(() => showStatusToast = false, 6000);
             },
             onLoadingChange: (loading) => {
                 isLoading = loading;
             }
         });
     }
-    
+
     async function fetchDatabases() {
         try {
             databases = await databaseManager.loadDatabases();
-            console.log('Loaded databases:', databases);
         } catch (error) {
-            console.error('Failed to fetch databases:', error);
             statusMessage = 'Failed to load databases: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function fetchSchemas() {
         try {
-            availableSchemas = await databaseManager.loadSchemas();
-            console.log('Loaded schemas:', availableSchemas);
+            availableSchemas = await databaseManager.loadSchemas?.() || [];
         } catch (error) {
-            console.error('Failed to fetch schemas:', error);
             statusMessage = 'Failed to load schemas: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function selectDatabase(database) {
-        console.log('Selecting database:', database);
         selectedDatabase = database;
         selectedTable = null;
         tables = database.tables || [];
@@ -113,75 +104,69 @@
         tableSchema = [];
         currentPage = 1;
         searchQuery = '';
-        console.log('Database selected, tables:', tables);
     }
-    
+
     async function selectTable(table) {
         if (!selectedDatabase) return;
-        
-        console.log('Selecting table:', table);
         selectedTable = table;
         try {
             const result = await databaseManager.selectTable(selectedDatabase.name, table.name);
             records = result.tableData || [];
             tableSchema = result.tableSchema || [];
-            console.log('Table selected, records:', records.length, 'schema:', tableSchema);
         } catch (error) {
-            console.error('Failed to select table:', error);
             statusMessage = 'Failed to load table: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function createDatabase() {
         if (!newDatabaseName.trim()) {
             statusMessage = 'Database name is required';
+            showStatusToast = true;
             return;
         }
-        
         let schemaToUse = null;
-        
         if (schemaCreationMethod === 'existing') {
             if (!selectedSchema) {
                 statusMessage = 'Please select a schema';
+                showStatusToast = true;
                 return;
             }
             schemaToUse = selectedSchema;
         } else if (schemaCreationMethod === 'import') {
             if (!importedSchema) {
                 statusMessage = 'Please import a schema file';
+                showStatusToast = true;
                 return;
             }
             schemaToUse = importedSchema;
         }
-        
         if (!schemaToUse) {
             statusMessage = 'No schema selected';
+            showStatusToast = true;
             return;
         }
-        
-        // Create database creation request with the selected schema
         const createRequest = {
             schema: {
                 ...schemaToUse,
-                name: newDatabaseName, // Override the name with the new database name
+                name: newDatabaseName,
                 createdAt: new Date().toISOString()
             },
             requestedSpace: requestedSpace,
             allocatedPeers: []
         };
-        
         try {
-            console.log('Creating database with schema:', createRequest);
             await databaseManager.createDatabase(createRequest);
             await fetchDatabases();
             resetCreateForm();
             statusMessage = 'Database created successfully';
+            showStatusToast = true;
         } catch (error) {
-            console.error('Failed to create database:', error);
             statusMessage = 'Failed to create database: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     function resetCreateForm() {
         showCreateModal = false;
         newDatabaseName = '';
@@ -191,11 +176,10 @@
         schemaCreationMethod = 'existing';
         requestedSpace = 1024 * 1024 * 1024;
     }
-    
+
     function handleFileImport(event) {
         const file = event.target.files[0];
         if (!file) return;
-        
         const reader = new FileReader();
         reader.onload = (e) => {
             try {
@@ -203,15 +187,15 @@
                 importedSchema = schema;
                 importFile = file;
                 statusMessage = `Schema imported: ${schema.name || 'Unnamed'}`;
-                console.log('Imported schema:', schema);
+                showStatusToast = true;
             } catch (error) {
                 statusMessage = 'Invalid schema file format';
-                console.error('Schema import error:', error);
+                showStatusToast = true;
             }
         };
         reader.readAsText(file);
     }
-    
+
     function formatBytes(bytes) {
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
@@ -219,74 +203,67 @@
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
-    
+
     function openCreateModal() {
         showCreateModal = true;
-        fetchSchemas(); // Load schemas when modal opens
+        fetchSchemas();
     }
-    
+
     async function createRecord() {
         if (!selectedDatabase || !selectedTable || !newRecord) return;
-        
         try {
-            await databaseManager.addRecord(selectedDatabase.name, selectedTable.name, newRecord);
+            await databaseManager.insertRecord(selectedDatabase.name, selectedTable.name, newRecord);
             await selectTable(selectedTable);
             resetRecordForm();
             statusMessage = 'Record created successfully';
+            showStatusToast = true;
         } catch (error) {
-            console.error('Failed to create record:', error);
             statusMessage = 'Failed to create record: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function updateRecord() {
         if (!selectedDatabase || !selectedTable || !editingRecord) return;
-        
         try {
             const recordToUpdate = { ...newRecord };
-            await databaseManager.updateRecord(selectedDatabase.name, selectedTable.name, recordToUpdate);
+            await databaseManager.updateRecord(selectedDatabase.name, selectedTable.name, editingRecord.id, recordToUpdate);
             await selectTable(selectedTable);
             resetRecordForm();
             statusMessage = 'Record updated successfully';
+            showStatusToast = true;
         } catch (error) {
-            console.error('Failed to update record:', error);
             statusMessage = 'Failed to update record: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function deleteRecord(recordId) {
         if (!confirm('Are you sure you want to delete this record?')) return;
-        
         try {
             await databaseManager.deleteRecord(selectedDatabase.name, selectedTable.name, recordId);
             await selectTable(selectedTable);
             statusMessage = 'Record deleted successfully';
+            showStatusToast = true;
         } catch (error) {
-            console.error('Failed to delete record:', error);
             statusMessage = 'Failed to delete record: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     async function deleteDatabase(databaseName) {
         if (!confirm(`Are you sure you want to delete the database "${databaseName}"? This action cannot be undone.`)) {
             return;
         }
-        
         try {
             isLoading = true;
             statusMessage = `Deleting database "${databaseName}"...`;
-            
+            showStatusToast = true;
             await databaseManager.deleteDatabase(databaseName);
-            
-            // Wait a bit for the deletion to propagate
             await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            // Reload databases
             await fetchDatabases();
-            
             statusMessage = `Database "${databaseName}" deleted successfully`;
-            
-            // Clear selection if deleted database was selected
+            showStatusToast = true;
             if (selectedDatabase?.name === databaseName) {
                 selectedDatabase = null;
                 selectedTable = null;
@@ -295,25 +272,23 @@
                 tableSchema = [];
             }
         } catch (error) {
-            console.error('Failed to delete database:', error);
             statusMessage = 'Failed to delete database: ' + error.message;
+            showStatusToast = true;
         } finally {
             isLoading = false;
-            setTimeout(() => statusMessage = '', 5000);
         }
     }
-    
+
     function editRecord(record) {
         editingRecord = record;
         newRecord = { ...record };
         showRecordModal = true;
     }
-    
+
     function resetRecordForm() {
         showRecordModal = false;
         editingRecord = null;
         newRecord = {};
-        
         if (tableSchema.length > 0) {
             newRecord = {};
             tableSchema.forEach(column => {
@@ -321,7 +296,7 @@
             });
         }
     }
-    
+
     function prepareNewRecord() {
         newRecord = {};
         if (tableSchema.length > 0) {
@@ -331,26 +306,27 @@
         }
         showRecordModal = true;
     }
-    
+
     function handleSearch() {
         currentPage = 1;
     }
-    
+
     function exportTable() {
         if (!selectedDatabase || !selectedTable) return;
-        
         try {
-            databaseManager.exportTableData(records, tableSchema, selectedDatabase.name, selectedTable.name);
+            databaseManager.exportTableData?.(records, tableSchema, selectedDatabase.name, selectedTable.name);
             statusMessage = 'Table exported successfully';
+            showStatusToast = true;
         } catch (error) {
-            console.error('Failed to export table:', error);
             statusMessage = 'Failed to export table: ' + error.message;
+            showStatusToast = true;
         }
     }
-    
+
     function openAddTableModal() {
         if (!selectedDatabase) {
             statusMessage = 'Please select a database first';
+            showStatusToast = true;
             return;
         }
         showAddTableModal = true;
@@ -358,108 +334,170 @@
         newTableColumns = [];
         newTableColumn = { name: '', type: 'VARCHAR', length: 255 };
     }
-    
-    function addColumn() {
-        if (!newTableColumn.name.trim()) {
-            statusMessage = 'Column name is required';
-            return;
-        }
-        
-        if (newTableColumns.find(col => col.name === newTableColumn.name)) {
-            statusMessage = 'Column name already exists';
-            return;
-        }
-        
-        const selectedType = mysqlTypes.find(t => t.value === newTableColumn.type);
-        const column = {
-            id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
-            name: newTableColumn.name,
-            type: newTableColumn.type,
-            length: selectedType?.hasLength ? (newTableColumn.length || selectedType.defaultLength) : null
-        };
-        
-        newTableColumns = [...newTableColumns, column];
-        newTableColumn = { name: '', type: 'VARCHAR', length: 255 };
-        statusMessage = '';
-    }
-    
-    function removeColumn(columnId) {
-        newTableColumns = newTableColumns.filter(col => col.id !== columnId);
-    }
-    
-    async function createTable() {
-        if (!newTableName.trim()) {
-            statusMessage = 'Table name is required';
-            return;
-        }
-        
-        if (newTableColumns.length === 0) {
-            statusMessage = 'At least one column is required';
-            return;
-        }
-        
-        try {
-            const tableData = {
-                name: newTableName,
-                columns: newTableColumns
-            };
-            
-            await databaseManager.addTableToDatabase(selectedDatabase.name, tableData);
-            await fetchDatabases();
-            
-            // Update the current database selection
-            const updatedDatabase = databases.find(db => db.name === selectedDatabase.name);
-            if (updatedDatabase) {
-                await selectDatabase(updatedDatabase);
-            }
-            
-            resetAddTableForm();
-            statusMessage = `Table "${newTableName}" created successfully`;
-        } catch (error) {
-            console.error('Failed to create table:', error);
-            statusMessage = 'Failed to create table: ' + error.message;
-        }
-    }
-    
+
     function resetAddTableForm() {
         showAddTableModal = false;
         newTableName = '';
         newTableColumns = [];
         newTableColumn = { name: '', type: 'VARCHAR', length: 255 };
     }
-    
-    // Computed properties for pagination
+
+    function addColumn() {
+        if (!newTableColumn.name.trim()) {
+            statusMessage = 'Column name is required';
+            showStatusToast = true;
+            return;
+        }
+        if (newTableColumns.find(col => col.name === newTableColumn.name)) {
+            statusMessage = 'Column name already exists';
+            showStatusToast = true;
+            return;
+        }
+        const selectedType = mysqlTypes.find(t => t.value === newTableColumn.type);
+        const column = {
+            id: uuidv4(),
+            name: newTableColumn.name,
+            type: newTableColumn.type,
+            length: selectedType?.hasLength ? (newTableColumn.length || selectedType.defaultLength) : null
+        };
+        newTableColumns = [...newTableColumns, column];
+        newTableColumn = { name: '', type: 'VARCHAR', length: 255 };
+        statusMessage = '';
+    }
+
+    function removeColumn(columnId) {
+        newTableColumns = newTableColumns.filter(col => col.id !== columnId);
+    }
+
+    async function createTable() {
+        if (!newTableName.trim()) {
+            statusMessage = 'Table name is required';
+            showStatusToast = true;
+            return;
+        }
+        if (newTableColumns.length === 0) {
+            statusMessage = 'At least one column is required';
+            showStatusToast = true;
+            return;
+        }
+        try {
+            const tableData = {
+                name: newTableName,
+                columns: newTableColumns
+            };
+            await databaseManager.addTableToDatabase(selectedDatabase.name, tableData);
+            const tablesResult = await databaseManager.getTables(selectedDatabase.name);
+            tables = tablesResult.tables || [];
+            const updatedDatabase = databases.find(db => db.name === selectedDatabase.name);
+            if (updatedDatabase) {
+                updatedDatabase.tables = tables;
+                await selectDatabase(updatedDatabase);
+            }
+            resetAddTableForm();
+            statusMessage = `Table "${newTableName}" created successfully`;
+            showStatusToast = true;
+        } catch (error) {
+            statusMessage = 'Failed to create table: ' + error.message;
+            showStatusToast = true;
+        }
+    }
+
+    async function deleteTable(tableName) {
+        if (!selectedDatabase) return;
+        if (!confirm(`Are you sure you want to delete the table "${tableName}"?`)) return;
+        try {
+            await databaseManager.deleteTable(selectedDatabase.name, tableName);
+            const tablesResult = await databaseManager.getTables(selectedDatabase.name);
+            tables = tablesResult.tables || [];
+            statusMessage = `Table "${tableName}" deleted successfully`;
+            showStatusToast = true;
+            if (selectedTable?.name === tableName) {
+                selectedTable = null;
+                records = [];
+                tableSchema = [];
+            }
+        } catch (error) {
+            statusMessage = 'Failed to delete table: ' + error.message;
+            showStatusToast = true;
+        }
+    }
+
+    // Table rename modal logic
+    function openRenameTableModal(oldName) {
+        showRenameTableModal = true;
+        renameTableOldName = oldName;
+        renameTableNewName = oldName;
+    }
+    function closeRenameTableModal() {
+        showRenameTableModal = false;
+        renameTableOldName = '';
+        renameTableNewName = '';
+    }
+    async function confirmRenameTable() {
+        if (!renameTableNewName.trim()) {
+            statusMessage = 'New table name is required';
+            showStatusToast = true;
+            return;
+        }
+        await renameTable(renameTableOldName, renameTableNewName);
+        closeRenameTableModal();
+    }
+    async function renameTable(oldName, newName) {
+        if (!selectedDatabase) return;
+        try {
+            await databaseManager.renameTable(selectedDatabase.name, oldName, newName);
+            const tablesResult = await databaseManager.getTables(selectedDatabase.name);
+            tables = tablesResult.tables || [];
+            statusMessage = `Table "${oldName}" renamed to "${newName}"`;
+            showStatusToast = true;
+        } catch (error) {
+            statusMessage = 'Failed to rename table: ' + error.message;
+            showStatusToast = true;
+        }
+    }
+
+    // Pagination
     $: filteredRecords = records.filter(record => {
         if (!searchQuery) return true;
-        return Object.values(record).some(value => 
+        return Object.values(record).some(value =>
             String(value).toLowerCase().includes(searchQuery.toLowerCase())
         );
     });
-    
     $: paginatedRecords = filteredRecords.slice(
         (currentPage - 1) * itemsPerPage,
         currentPage * itemsPerPage
     );
-    
     $: totalPages = Math.ceil(filteredRecords.length / itemsPerPage);
-    
+
     function nextPage() {
         if (currentPage < totalPages) {
             currentPage++;
         }
     }
-    
     function prevPage() {
         if (currentPage > 1) {
             currentPage--;
         }
     }
-    
+
     onMount(() => {
         setupCallbacks();
         fetchDatabases();
     });
 </script>
+
+{#if isLoading}
+    <div class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+{/if}
+
+{#if showStatusToast}
+    <div class="toast" on:click={() => showStatusToast = false}>
+        {statusMessage}
+        <button class="btn btn-sm btn-clear" style="margin-left:1rem;" on:click={() => showStatusToast = false}><X size="14" /></button>
+    </div>
+{/if}
 
 <div class="tab-content">
     <div class="database-layout">
@@ -470,12 +508,11 @@
                     <Plus size="14" />
                 </button>
             </div>
-            
             <div class="databases-list">
                 {#each databases as database}
                     <div class="database-item">
                         <div class="database-header">
-                            <button 
+                            <button
                                 class="database-button {selectedDatabase?.name === database.name ? 'active' : ''}"
                                 on:click={() => selectDatabase(database)}
                             >
@@ -483,32 +520,38 @@
                                 <span>{database.name}</span>
                                 <span class="table-count">{database.tables?.length || 0}</span>
                             </button>
-                            <button 
-                                class="btn btn-sm btn-danger delete-db-btn" 
+                            <button
+                                class="btn btn-sm btn-danger delete-db-btn"
                                 on:click|stopPropagation={() => deleteDatabase(database.name)}
                                 title="Delete Database"
                             >
                                 <Trash2 size="12" />
                             </button>
                         </div>
-                        
                         {#if selectedDatabase?.name === database.name && tables.length > 0}
                             <div class="tables-list">
                                 {#each tables as table}
-                                    <button 
-                                        class="table-button {selectedTable?.name === table.name ? 'active' : ''}"
-                                        on:click={() => selectTable(table)}
-                                    >
-                                        <Table size="14" />
-                                        <span>{table.name}</span>
-                                        <span class="column-count">{table.columns?.length || 0}</span>
-                                    </button>
+                                    <div class="table-sidebar-row">
+                                        <button
+                                            class="table-button {selectedTable?.name === table.name ? 'active' : ''}"
+                                            on:click={() => selectTable(table)}
+                                        >
+                                            <Table size="14" />
+                                            <span>{table.name}</span>
+                                            <span class="column-count">{table.columns?.length || 0}</span>
+                                        </button>
+                                        <button class="btn btn-sm" title="Rename Table" on:click|stopPropagation={() => openRenameTableModal(table.name)}>
+                                            <Edit size="12" />
+                                        </button>
+                                        <button class="btn btn-sm btn-danger" title="Delete Table" on:click|stopPropagation={() => deleteTable(table.name)}>
+                                            <Trash2 size="12" />
+                                        </button>
+                                    </div>
                                 {/each}
                             </div>
                         {/if}
                     </div>
                 {/each}
-                
                 {#if databases.length === 0 && !isLoading}
                     <div class="empty-sidebar">
                         <p>No databases found</p>
@@ -517,23 +560,16 @@
                 {/if}
             </div>
         </div>
-        
         <div class="records-main">
-            {#if statusMessage}
-                <div class="status-message">
-                    {statusMessage}
-                </div>
-            {/if}
-            
             {#if selectedTable}
                 <div class="records-header">
                     <h2>{selectedDatabase.name}.{selectedTable.name}</h2>
                     <div class="records-actions">
                         <div class="search-box">
                             <Search size="16" />
-                            <input 
-                                class="search-input" 
-                                type="text" 
+                            <input
+                                class="search-input"
+                                type="text"
                                 bind:value={searchQuery}
                                 placeholder="Search records..."
                                 on:input={handleSearch}
@@ -547,7 +583,6 @@
                         </button>
                     </div>
                 </div>
-                
                 {#if isLoading}
                     <div class="loading-state">
                         <p>Loading...</p>
@@ -568,7 +603,6 @@
                                 <div class="table-cell header-cell">Actions</div>
                             </div>
                         </div>
-                        
                         <div class="table-body">
                             {#each paginatedRecords as record}
                                 <div class="table-row">
@@ -589,7 +623,6 @@
                             {/each}
                         </div>
                     </div>
-                    
                     <div class="pagination">
                         <button class="btn btn-sm" on:click={prevPage} disabled={currentPage === 1}>
                             Previous
@@ -603,7 +636,6 @@
                     </div>
                 {/if}
             {:else if selectedDatabase}
-                <!-- Update the empty state when database is selected but no tables -->
                 {#if selectedDatabase && tables.length === 0}
                     <div class="empty-state">
                         <Table size="48" />
@@ -633,6 +665,25 @@
         </div>
     </div>
 </div>
+
+<!-- Rename Table Modal -->
+{#if showRenameTableModal}
+    <div class="modal-overlay" on:click={closeRenameTableModal}>
+        <div class="modal" on:click|stopPropagation>
+            <div class="modal-header">
+                <h3>Rename Table</h3>
+                <button class="btn btn-sm" on:click={closeRenameTableModal}><X size="16" /></button>
+            </div>
+            <div class="modal-content">
+                <input class="form-input" type="text" bind:value={renameTableNewName} placeholder="New table name..." />
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" on:click={closeRenameTableModal}>Cancel</button>
+                <button class="btn btn-primary" on:click={confirmRenameTable}><Save size="16" /> Rename</button>
+            </div>
+        </div>
+    </div>
+{/if}
 
 <!-- Improved Create Database Modal -->
 {#if showCreateModal}
@@ -1415,5 +1466,75 @@
     .column-type {
         font-size: 0.9rem;
         color: var(--text-secondary);
+    }
+    
+    .table-sidebar-row {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+    }
+    
+    .loading-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(255,255,255,0.7);
+        z-index: 2000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .spinner {
+        border: 4px solid #eee;
+        border-top: 4px solid var(--primary-color, #007bff);
+        border-radius: 50%;
+        width: 48px;
+        height: 48px;
+        animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg);}
+        100% { transform: rotate(360deg);}
+    }
+    
+    .toast {
+        position: fixed;
+        top: 1rem;
+        right: 1rem;
+        background: var(--info-bg, #f0f4ff);
+        color: var(--text-color, #222);
+        border: 1px solid var(--info-border, #b3d4fc);
+        border-radius: 6px;
+        padding: 1rem 1.5rem;
+        z-index: 3000;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+        min-width: 220px;
+    }
+    
+    .btn-clear {
+        background: transparent;
+        color: inherit;
+        border: none;
+        padding: 0.2rem;
+        cursor: pointer;
+    }
+    
+    @media (max-width: 700px) {
+        .database-layout {
+            grid-template-columns: 1fr;
+            height: auto;
+        }
+        .databases-sidebar {
+            max-width: 100vw;
+            min-width: 0;
+        }
+        .records-main {
+            padding: 0.5rem;
+        }
     }
 </style>
