@@ -180,6 +180,20 @@ app.delete('/database/:dbName/:tableName/:id', async (req, res) => {
   }
 });
 
+// Add proxy for database deletion
+app.delete('/database/:dbName', async (req, res) => {
+  const { dbName } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}`, {
+      method: 'DELETE'
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
+  }
+});
+
 // Proxy: Get table schema
 app.get('/database/:dbName/:tableName/schema', async (req, res) => {
   const { dbName, tableName } = req.params;
@@ -1165,6 +1179,22 @@ app.get('/test-superpeer', async (req, res) => {
       message: error.message,
       url: SUPER_PEER_URL
     });
+  }
+});
+
+// Add proxy for adding table to database
+app.post('/database/:dbName/table', async (req, res) => {
+  const { dbName } = req.params;
+  try {
+    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/table`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
   }
 });
 

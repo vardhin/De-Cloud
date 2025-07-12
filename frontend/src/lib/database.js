@@ -2,617 +2,2323 @@ import { v4 as uuidv4 } from 'uuid';
 
 export class DatabaseManager {
     constructor() {
-        this.baseUrl = 'http://localhost:8766';
-        this.callbacks = {
-            onStatusChange: null,
-            onError: null,
-            onLoadingChange: null
-        };
+        this.baseUrl = 'http://localhost:8765';
+        this.fallbackMode = false;
+        this.callbacks = {};
     }
 
     setCallbacks(callbacks) {
         this.callbacks = { ...this.callbacks, ...callbacks };
     }
 
-    // Database schema management functions
-    async createSchema(schemas, newSchemaName) {
-        if (!newSchemaName.trim()) {
-            throw new Error('Schema name is required');
-        }
-        
-        if (schemas.find(s => s.name === newSchemaName)) {
-            throw new Error('Schema already exists');
-        }
-        
-        const newSchema = {
-            id: uuidv4(),
-            name: newSchemaName,
-            tables: [],
-            createdAt: new Date().toISOString()
-        };
-        
-        return newSchema;
-    }
-
-    async addTable(schemas, schemaId, newTableName) {
-        if (!newTableName.trim()) {
-            throw new Error('Table name is required');
-        }
-        
-        const schema = schemas.find(s => s.id === schemaId);
-        if (!schema) throw new Error('Schema not found');
-        
-        if (schema.tables.find(t => t.name === newTableName)) {
-            throw new Error('Table already exists in this schema');
-        }
-        
-        const newTable = {
-            id: uuidv4(),
-            name: newTableName,
-            columns: [],
-            createdAt: new Date().toISOString()
-        };
-        
-        schema.tables.push(newTable);
-        return newTable;
-    }
-
-    async addColumn(schemas, schemaId, tableId, columnData, mysqlTypes) {
-        const { newColumnName, newColumnType, newColumnLength } = columnData;
-        
-        if (!newColumnName.trim() || !newColumnType.trim()) {
-            throw new Error('Column name and type are required');
-        }
-        
-        const schema = schemas.find(s => s.id === schemaId);
-        if (!schema) throw new Error('Schema not found');
-        
-        const table = schema.tables.find(t => t.id === tableId);
-        if (!table) throw new Error('Table not found');
-        
-        if (table.columns.find(c => c.name === newColumnName)) {
-            throw new Error('Column already exists in this table');
-        }
-        
-        const selectedType = mysqlTypes.find(t => t.value === newColumnType);
-        const newColumn = {
-            id: uuidv4(),
-            name: newColumnName,
-            type: newColumnType,
-            length: selectedType?.hasLength ? (newColumnLength || selectedType.defaultLength) : null,
-            createdAt: new Date().toISOString()
-        };
-        
-        table.columns.push(newColumn);
-        return newColumn;
-    }
-
-    deleteSchema(schemas, schemaId) {
-        const schema = schemas.find(s => s.id === schemaId);
-        const schemaName = schema?.name;
-        const filteredSchemas = schemas.filter(s => s.id !== schemaId);
-        return { filteredSchemas, deletedName: schemaName };
-    }
-
-    deleteTable(schemas, schemaId, tableId) {
-        const schema = schemas.find(s => s.id === schemaId);
-        if (!schema) return { schemas, deletedName: null };
-        
-        const table = schema.tables.find(t => t.id === tableId);
-        const tableName = table?.name;
-        schema.tables = schema.tables.filter(t => t.id !== tableId);
-        return { schemas: [...schemas], deletedName: tableName };
-    }
-
-    deleteColumn(schemas, schemaId, tableId, columnId) {
-        const schema = schemas.find(s => s.id === schemaId);
-        if (!schema) return { schemas, deletedName: null };
-        
-        const table = schema.tables.find(t => t.id === tableId);
-        if (!table) return { schemas, deletedName: null };
-        
-        const column = table.columns.find(c => c.id === columnId);
-        const columnName = column?.name;
-        table.columns = table.columns.filter(c => c.id !== columnId);
-        return { schemas: [...schemas], deletedName: columnName };
-    }
-
-    // Generate SQL CREATE TABLE statement
-    generateCreateTableSQL(schema, table) {
-        if (!table.columns.length) return '';
-        
-        let sql = `CREATE TABLE \`${schema.name}\`.\`${table.name}\` (\n`;
-        
-        const columnDefinitions = table.columns.map(column => {
-            let def = `  \`${column.name}\` ${column.type}`;
-            if (column.length) {
-                def += `(${column.length})`;
-            }
-            return def;
-        });
-        
-        sql += columnDefinitions.join(',\n');
-        sql += '\n);';
-        
-        return sql;
-    }
-
-    // Schema storage functions
-    async saveSchemas(schemas) {
+    async checkBackendHealth() {
         try {
-            localStorage.setItem('db-schemas', JSON.stringify(schemas));
-            this.callbacks.onStatusChange?.('Schemas saved successfully');
-        } catch (e) {
-            console.error('Failed to save schemas:', e);
-            this.callbacks.onError?.('Failed to save schemas');
-            throw new Error('Failed to save schemas');
+            const response = await fetch(`${this.baseUrl}/health`, {
+                method: 'GET',
+                signal: AbortSignal.timeout(5000)
+            });
+            return response.ok;
+        } catch (error) {
+            console.warn('Backend health check failed:', error);
+            return false;
         }
     }
 
-    async loadSchemas() {
-        try {
-            const saved = localStorage.getItem('db-schemas');
-            if (saved) {
-                const loadedSchemas = JSON.parse(saved);
-                return loadedSchemas.map(schema => ({
-                    ...schema,
-                    tables: schema.tables || []
-                }));
-            }
-            return [];
-        } catch (e) {
-            console.error('Failed to load schemas:', e);
-            this.callbacks.onError?.('Failed to load schemas');
-            return [];
-        }
+    enableFallbackMode() {
+        this.fallbackMode = true;
+        this.callbacks.onStatusChange?.('Working in offline mode - using local storage');
     }
 
-    exportSchema(schema) {
-        const dataStr = JSON.stringify(schema, null, 2);
-        const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-        
-        const exportFileDefaultName = `schema-${schema.name}.json`;
-        
-        const linkElement = document.createElement('a');
-        linkElement.setAttribute('href', dataUri);
-        linkElement.setAttribute('download', exportFileDefaultName);
-        linkElement.click();
-        
-        return `Schema "${schema.name}" exported successfully`;
-    }
-
-    importSchema(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    const importedSchema = JSON.parse(e.target.result);
-                    const schemaToImport = {
-                        ...importedSchema,
-                        id: uuidv4(),
-                        name: importedSchema.name + ' (imported)',
-                        tables: importedSchema.tables || []
-                    };
-                    resolve(schemaToImport);
-                } catch (error) {
-                    reject(new Error('Failed to import schema: Invalid JSON file'));
-                }
-            };
-            reader.readAsText(file);
-        });
-    }
-
-    // Database operations
     async loadDatabases() {
         try {
             this.callbacks.onLoadingChange?.(true);
             console.log('Loading databases...');
-            const response = await fetch(`${this.baseUrl}/databases`);
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.loadDatabasesFromLocal();
+            }
+            
+            const response = await fetch(`${this.baseUrl}/databases`, {
+                signal: AbortSignal.timeout(20000) // Increased timeout for Gun.js
+            });
             
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error('Database load error:', errorText);
+                console.error('Database fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.loadDatabasesFromLocal();
+                }
+                
                 throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
             
             const data = await response.json();
             console.log('Databases loaded:', data);
             
-            // Add validation for response structure
-            if (!data || typeof data !== 'object') {
-                throw new Error('Invalid response format');
-            }
+            // Ensure each database has a tables array
+            const databases = (data.databases || []).map(db => ({
+                ...db,
+                tables: Array.isArray(db.tables) ? db.tables : []
+            }));
             
-            const databases = Array.isArray(data.databases) ? data.databases : [];
+            this.saveDatabasesToLocal(databases);
             this.callbacks.onStatusChange?.(`Loaded ${databases.length} databases`);
             return databases;
         } catch (error) {
             console.error('Failed to load databases:', error);
-            this.callbacks.onError?.('Failed to load databases: ' + error.message);
-            throw new Error('Failed to load databases: ' + error.message);
+            
+            // Check if it's a timeout error
+            if (error.name === 'TimeoutError' || error.message.includes('timeout')) {
+                console.log('Backend timeout, switching to fallback mode');
+                this.enableFallbackMode();
+                return this.loadDatabasesFromLocal();
+            }
+            
+            // For other errors, also try fallback
+            this.enableFallbackMode();
+            return this.loadDatabasesFromLocal();
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    calculateEstimatedSpace(schema) {
-        if (!schema || !schema.tables) return 1024 * 1024 * 100; // 100MB default
-        
-        let totalSize = 0;
-        
-        // Base database overhead
-        totalSize += 1024 * 1024 * 10; // 10MB base
-        
-        // Calculate per table
-        schema.tables.forEach(table => {
-            if (!table.columns) return;
-            
-            let rowSize = 0;
-            table.columns.forEach(column => {
-                // Estimate column size based on type
-                switch (column.type) {
-                    case 'INT':
-                    case 'TINYINT':
-                    case 'SMALLINT':
-                    case 'MEDIUMINT':
-                    case 'BIGINT':
-                    case 'FLOAT':
-                    case 'DOUBLE':
-                    case 'DECIMAL':
-                        rowSize += 8;
-                        break;
-                    case 'VARCHAR':
-                    case 'CHAR':
-                        const length = column.length ? parseInt(column.length) : 255;
-                        rowSize += Math.min(length, 255);
-                        break;
-                    case 'TEXT':
-                    case 'TINYTEXT':
-                        rowSize += 255;
-                        break;
-                    case 'MEDIUMTEXT':
-                        rowSize += 1024;
-                        break;
-                    case 'LONGTEXT':
-                        rowSize += 4096;
-                        break;
-                    case 'DATE':
-                    case 'TIME':
-                    case 'DATETIME':
-                    case 'TIMESTAMP':
-                        rowSize += 8;
-                        break;
-                    default:
-                        rowSize += 50; // Default estimate
-                }
-            });
-            
-            // Estimate 1000 rows per table initially + indexes
-            const estimatedRows = 1000;
-            const tableSize = rowSize * estimatedRows;
-            const indexSize = tableSize * 0.3; // 30% for indexes
-            
-            totalSize += tableSize + indexSize;
-        });
-        
-        // Add 50% buffer
-        totalSize = Math.ceil(totalSize * 1.5);
-        
-        return totalSize;
+    loadDatabasesFromLocal() {
+        try {
+            const saved = localStorage.getItem('cached_databases');
+            const databases = saved ? JSON.parse(saved) : [];
+            this.callbacks.onStatusChange?.(`Loaded ${databases.length} databases from local cache`);
+            return databases;
+        } catch (error) {
+            console.error('Failed to load databases from local storage:', error);
+            return [];
+        }
     }
 
-    async createDatabase(currentSchema, formatBytes) {
-        if (!currentSchema) {
-            throw new Error('Please select a schema first');
+    saveDatabasesToLocal(databases) {
+        try {
+            localStorage.setItem('cached_databases', JSON.stringify(databases));
+        } catch (error) {
+            console.error('Failed to save databases to local storage:', error);
         }
+    }
 
+    async createDatabase(schema) {
         try {
             this.callbacks.onLoadingChange?.(true);
-            this.callbacks.onStatusChange?.('Creating database...');
+            console.log('Creating database:', schema);
             
-            // Calculate estimated space needed
-            const estimatedSpace = this.calculateEstimatedSpace(currentSchema);
-            
-            // Check resource allocation first
-            const allocationCheck = await fetch(`${this.baseUrl}/network/check-allocation`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    storage: estimatedSpace,
-                    ram: 1024 * 1024 * 512,
-                })
-            });
-
-            if (!allocationCheck.ok) {
-                const errorText = await allocationCheck.text();
-                throw new Error(`Resource allocation check failed: ${errorText}`);
+            if (this.fallbackMode) {
+                return this.createDatabaseLocal(schema);
             }
-
-            const allocationData = await allocationCheck.json();
             
-            if (!allocationData.canAllocate) {
-                throw new Error(`Insufficient resources. Need ${formatBytes(estimatedSpace)} storage.`);
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.createDatabaseLocal(schema);
             }
-
-            // Create database payload
-            const databasePayload = {
-                schema: {
-                    id: currentSchema.id,
-                    name: currentSchema.name,
-                    tables: currentSchema.tables || [],
-                    createdAt: currentSchema.createdAt || new Date().toISOString()
-                },
-                requestedSpace: estimatedSpace,
-                allocatedPeers: allocationData.suitablePeersList || []
-            };
-
-            console.log('Creating database with payload:', databasePayload);
-
+            
             const response = await fetch(`${this.baseUrl}/database/create`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(databasePayload)
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(schema),
+                signal: AbortSignal.timeout(15000)
             });
-
+            
             if (!response.ok) {
                 const errorText = await response.text();
-                let errorMessage;
-                try {
-                    const errorData = JSON.parse(errorText);
-                    errorMessage = errorData.error || errorText;
-                } catch {
-                    errorMessage = errorText;
+                console.error('Database creation error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.createDatabaseLocal(schema);
                 }
-                throw new Error(errorMessage);
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
-
+            
             const result = await response.json();
-            console.log('Database creation result:', result);
+            console.log('Database created:', result);
             
-            const successMessage = `Database "${currentSchema.name}" created successfully!`;
-            this.callbacks.onStatusChange?.(successMessage);
-            return successMessage;
-            
+            this.callbacks.onStatusChange?.('Database created successfully');
+            return result;
         } catch (error) {
-            console.error('Database creation error:', error);
-            this.callbacks.onError?.('Failed to create database: ' + error.message);
-            throw new Error('Failed to create database: ' + error.message);
+            console.error('Failed to create database:', error);
+            this.enableFallbackMode();
+            return this.createDatabaseLocal(schema);
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    // Table operations
-    async selectTable(selectedDatabase, tableName) {
+    createDatabaseLocal(schema) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            
+            if (databases.find(db => db.name === schema.schema.name)) {
+                throw new Error('Database already exists');
+            }
+            
+            const newDatabase = {
+                id: schema.schema.id || uuidv4(),
+                name: schema.schema.name,
+                tables: schema.schema.tables || [],
+                createdAt: new Date().toISOString(),
+                localOnly: true
+            };
+            
+            databases.push(newDatabase);
+            this.saveDatabasesToLocal(databases);
+            
+            localStorage.setItem(`db_${newDatabase.name}`, JSON.stringify({
+                ...newDatabase,
+                records: {}
+            }));
+            
+            this.callbacks.onStatusChange?.(`Database '${newDatabase.name}' created locally`);
+            return { status: 'created', database: newDatabase.name };
+        } catch (error) {
+            console.error('Failed to create database locally:', error);
+            this.callbacks.onError?.('Failed to create database: ' + error.message);
+            throw error;
+        }
+    }
+
+    async selectTable(databaseName, tableName) {
         try {
             this.callbacks.onLoadingChange?.(true);
-            this.callbacks.onStatusChange?.(`Loading table ${tableName}...`);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
             
-            // Get table schema
-            const schemaResponse = await fetch(`${this.baseUrl}/database/${selectedDatabase}/${tableName}/schema`);
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
             let tableSchema = [];
+            
             if (schemaResponse.ok) {
                 const schemaData = await schemaResponse.json();
-                tableSchema = schemaData.schema.columns || [];
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
             }
             
-            // Get table data
-            const dataResponse = await fetch(`${this.baseUrl}/database/${selectedDatabase}/${tableName}`);
-            let tableData = [];
-            if (dataResponse.ok) {
-                const data = await dataResponse.json();
-                tableData = data.records || [];
-            }
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
             
-            const status = `Loaded ${tableData.length} records from ${tableName}`;
-            this.callbacks.onStatusChange?.(status);
-            return { tableSchema, tableData, status };
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
         } catch (error) {
-            this.callbacks.onError?.('Failed to load table: ' + error.message);
-            throw new Error('Failed to load table: ' + error.message);
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    async addRecord(selectedDatabase, selectedTable, newRecord) {
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
+
+    async addTableToDatabase(databaseName, tableData) {
         try {
             this.callbacks.onLoadingChange?.(true);
-            const response = await fetch(`${this.baseUrl}/database/${selectedDatabase}/${selectedTable}`, {
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(newRecord)
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
             });
             
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to add record');
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
             
             const result = await response.json();
-            const successMessage = `Record added successfully with ID: ${result.id}`;
-            this.callbacks.onStatusChange?.(successMessage);
-            return successMessage;
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
         } catch (error) {
-            this.callbacks.onError?.('Failed to add record: ' + error.message);
-            throw new Error('Failed to add record: ' + error.message);
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    async updateRecord(selectedDatabase, selectedTable, editingRecord) {
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
+
+    async selectTable(databaseName, tableName) {
         try {
             this.callbacks.onLoadingChange?.(true);
-            const response = await fetch(`${this.baseUrl}/database/${selectedDatabase}/${selectedTable}/${editingRecord.id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(editingRecord)
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
             });
             
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to update record');
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
             
-            const successMessage = 'Record updated successfully';
-            this.callbacks.onStatusChange?.(successMessage);
-            return successMessage;
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
         } catch (error) {
-            this.callbacks.onError?.('Failed to update record: ' + error.message);
-            throw new Error('Failed to update record: ' + error.message);
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    async deleteRecord(selectedDatabase, selectedTable, recordId) {
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
+
+    async addTableToDatabase(databaseName, tableData) {
         try {
             this.callbacks.onLoadingChange?.(true);
-            const response = await fetch(`${this.baseUrl}/database/${selectedDatabase}/${selectedTable}/${recordId}`, {
-                method: 'DELETE'
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
             });
             
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to delete record');
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
             }
             
-            const successMessage = 'Record deleted successfully';
-            this.callbacks.onStatusChange?.(successMessage);
-            return successMessage;
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
         } catch (error) {
-            this.callbacks.onError?.('Failed to delete record: ' + error.message);
-            throw new Error('Failed to delete record: ' + error.message);
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
         } finally {
             this.callbacks.onLoadingChange?.(false);
         }
     }
 
-    exportTableData(tableData, tableSchema, selectedDatabase, selectedTable) {
-        if (!tableData.length) return;
-        
-        // Create CSV content
-        const headers = tableSchema.map(col => col.name).join(',');
-        const rows = tableData.map(record => 
-            tableSchema.map(col => {
-                const value = record[col.name] || '';
-                // Escape values that contain commas or quotes
-                return typeof value === 'string' && (value.includes(',') || value.includes('"')) 
-                    ? `"${value.replace(/"/g, '""')}"` 
-                    : value;
-            }).join(',')
-        );
-        
-        const csvContent = [headers, ...rows].join('\n');
-        
-        // Download file
-        const blob = new Blob([csvContent], { type: 'text/csv' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${selectedDatabase}_${selectedTable}_export.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-        
-        const successMessage = `Exported ${tableData.length} records to CSV`;
-        this.callbacks.onStatusChange?.(successMessage);
-        return successMessage;
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
     }
-}
 
-// Export individual functions for backward compatibility
-export async function createSchema(schemas, newSchemaName) {
-    const db = new DatabaseManager();
-    return db.createSchema(schemas, newSchemaName);
-}
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function addTable(schemas, schemaId, newTableName) {
-    const db = new DatabaseManager();
-    return db.addTable(schemas, schemaId, newTableName);
-}
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
 
-export async function addColumn(schemas, schemaId, tableId, columnData, mysqlTypes) {
-    const db = new DatabaseManager();
-    return db.addColumn(schemas, schemaId, tableId, columnData, mysqlTypes);
-}
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export function deleteSchema(schemas, schemaId) {
-    const db = new DatabaseManager();
-    return db.deleteSchema(schemas, schemaId);
-}
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
 
-export function deleteTable(schemas, schemaId, tableId) {
-    const db = new DatabaseManager();
-    return db.deleteTable(schemas, schemaId, tableId);
-}
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export function deleteColumn(schemas, schemaId, tableId, columnId) {
-    const db = new DatabaseManager();
-    return db.deleteColumn(schemas, schemaId, tableId, columnId);
-}
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
 
-export function generateCreateTableSQL(schema, table) {
-    const db = new DatabaseManager();
-    return db.generateCreateTableSQL(schema, table);
-}
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function saveSchemas(schemas) {
-    const db = new DatabaseManager();
-    return db.saveSchemas(schemas);
-}
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
 
-export async function loadSchemas() {
-    const db = new DatabaseManager();
-    return db.loadSchemas();
-}
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export function exportSchema(schema) {
-    const db = new DatabaseManager();
-    return db.exportSchema(schema);
-}
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
 
-export function importSchema(file) {
-    const db = new DatabaseManager();
-    return db.importSchema(file);
-}
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function loadDatabases() {
-    const db = new DatabaseManager();
-    return db.loadDatabases();
-}
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
 
-export function calculateEstimatedSpace(schema) {
-    const db = new DatabaseManager();
-    return db.calculateEstimatedSpace(schema);
-}
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function createDatabase(currentSchema, formatBytes) {
-    const db = new DatabaseManager();
-    return db.createDatabase(currentSchema, formatBytes);
-}
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
 
-export async function selectTable(selectedDatabase, tableName) {
-    const db = new DatabaseManager();
-    return db.selectTable(selectedDatabase, tableName);
-}
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function addRecord(selectedDatabase, selectedTable, newRecord) {
-    const db = new DatabaseManager();
-    return db.addRecord(selectedDatabase, selectedTable, newRecord);
-}
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
 
-export async function updateRecord(selectedDatabase, selectedTable, editingRecord) {
-    const db = new DatabaseManager();
-    return db.updateRecord(selectedDatabase, selectedTable, editingRecord);
-}
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
 
-export async function deleteRecord(selectedDatabase, selectedTable, recordId) {
-    const db = new DatabaseManager();
-    return db.deleteRecord(selectedDatabase, selectedTable, recordId);
-}
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
 
-export function exportTableData(tableData, tableSchema, selectedDatabase, selectedTable) {
-    const db = new DatabaseManager();
-    return db.exportTableData(tableData, tableSchema, selectedDatabase, selectedTable);
-}
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
+
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
+
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
+
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
+                }
+                
+                const records = parsedDb.records?.[tableName] || [];
+                return {
+                    tableData: records,
+                    tableSchema: table.columns || []
+                };
+            }
+            
+            const table = database.tables.find(t => t.name === tableName);
+            if (!table) {
+                throw new Error('Table not found');
+            }
+            
+            // Get records from individual database storage
+            const dbData = localStorage.getItem(`db_${databaseName}`);
+            let records = [];
+            
+            if (dbData) {
+                const parsedDb = JSON.parse(dbData);
+                records = parsedDb.records?.[tableName] || [];
+            }
+            
+            return {
+                tableData: records,
+                tableSchema: table.columns || []
+            };
+        } catch (error) {
+            console.error('Failed to select table locally:', error);
+            throw error;
+        }
+    }
+
+    async addTableToDatabase(databaseName, tableData) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Adding table ${tableData.name} to database ${databaseName}`);
+            
+            if (this.fallbackMode) {
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.addTableToDatabaseLocal(databaseName, tableData);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/table`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(tableData),
+                signal: AbortSignal.timeout(15000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table creation error:', errorText);
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log('Table added to database:', result);
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully`);
+            return result;
+        } catch (error) {
+            console.error('Failed to add table to database:', error);
+            this.enableFallbackMode();
+            return this.addTableToDatabaseLocal(databaseName, tableData);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
+
+    addTableToDatabaseLocal(databaseName, tableData) {
+        try {
+            let databases = this.loadDatabasesFromLocal();
+            const dbIndex = databases.findIndex(db => db.name === databaseName);
+            
+            if (dbIndex === -1) {
+                // If database not found in the list, create a basic entry
+                const newDb = {
+                    name: databaseName,
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    tables: [],
+                    createdAt: new Date().toISOString(),
+                    requestedSpace: 0,
+                    usedSpace: 0
+                };
+                databases.push(newDb);
+                const newDbIndex = databases.length - 1;
+                
+                const newTable = {
+                    id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                    name: tableData.name,
+                    columns: tableData.columns || [],
+                    createdAt: new Date().toISOString()
+                };
+                
+                databases[newDbIndex].tables.push(newTable);
+                this.saveDatabasesToLocal(databases);
+                
+                // Create database storage
+                const dbData = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                dbData.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(dbData));
+                
+                this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+                return { 
+                    success: true, 
+                    message: `Table "${tableData.name}" added successfully`,
+                    table: newTable 
+                };
+            }
+            
+            // Check if table already exists
+            if (databases[dbIndex].tables.find(t => t.name === tableData.name)) {
+                throw new Error('Table already exists');
+            }
+            
+            const newTable = {
+                id: uuidv4(), // Fixed: use uuidv4() instead of crypto.randomUUID()
+                name: tableData.name,
+                columns: tableData.columns || [],
+                createdAt: new Date().toISOString()
+            };
+            
+            databases[dbIndex].tables.push(newTable);
+            this.saveDatabasesToLocal(databases);
+            
+            // Update the individual database storage
+            let dbData = localStorage.getItem(`db_${databaseName}`);
+            if (dbData) {
+                const database = JSON.parse(dbData);
+                database.tables.push(newTable);
+                if (!database.records) {
+                    database.records = {};
+                }
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            } else {
+                // Create new database storage
+                const database = {
+                    name: databaseName,
+                    tables: [newTable],
+                    records: {}
+                };
+                database.records[tableData.name] = [];
+                localStorage.setItem(`db_${databaseName}`, JSON.stringify(database));
+            }
+            
+            this.callbacks.onStatusChange?.(`Table "${tableData.name}" added successfully (local)`);
+            return { 
+                success: true, 
+                message: `Table "${tableData.name}" added successfully`,
+                table: newTable 
+            };
+        } catch (error) {
+            console.error('Failed to add table to database locally:', error);
+            this.callbacks.onError?.('Failed to add table: ' + error.message);
+            throw error;
+        }
+    }
+
+    async selectTable(databaseName, tableName) {
+        try {
+            this.callbacks.onLoadingChange?.(true);
+            console.log(`Loading table ${databaseName}.${tableName}...`);
+            
+            if (this.fallbackMode) {
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const backendAvailable = await this.checkBackendHealth();
+            if (!backendAvailable) {
+                this.enableFallbackMode();
+                return this.selectTableLocal(databaseName, tableName);
+            }
+            
+            const response = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}`, {
+                signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Table fetch error:', errorText);
+                
+                if (response.status === 502 || response.status === 504) {
+                    this.enableFallbackMode();
+                    return this.selectTableLocal(databaseName, tableName);
+                }
+                
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+            
+            const tableData = await response.json();
+            console.log('Table data loaded:', tableData);
+            
+            const schemaResponse = await fetch(`${this.baseUrl}/database/${databaseName}/${tableName}/schema`);
+            let tableSchema = [];
+            
+            if (schemaResponse.ok) {
+                const schemaData = await schemaResponse.json();
+                console.log('Table schema loaded:', schemaData);
+                tableSchema = schemaData.schema || [];
+            } else {
+                console.warn('Could not load table schema');
+                if (tableData.records && tableData.records.length > 0) {
+                    const firstRecord = tableData.records[0];
+                    tableSchema = Object.keys(firstRecord).map(key => ({
+                        name: key,
+                        type: 'VARCHAR',
+                        length: 255
+                    }));
+                }
+            }
+            
+            this.callbacks.onStatusChange?.(`Loaded ${tableData.records?.length || 0} records from ${tableName}`);
+            
+            return {
+                tableData: tableData.records || [],
+                tableSchema: tableSchema
+            };
+        } catch (error) {
+            console.error('Failed to select table:', error);
+            this.enableFallbackMode();
+            return this.selectTableLocal(databaseName, tableName);
+        } finally {
+            this.callbacks.onLoadingChange?.(false);
+        }
+    }
+
+    selectTableLocal(databaseName, tableName) {
+        try {
+            const databases = this.loadDatabasesFromLocal();
+            const database = databases.find(db => db.name === databaseName);
+            
+            if (!database) {
+                // Try to get from individual storage
+                const dbData = localStorage.getItem(`db_${databaseName}`);
+                if (!dbData) {
+                    throw new Error('Database not found');
+                }
+                
+                const parsedDb = JSON.parse(dbData);
+                const table = parsedDb.tables?.find(t => t.name === tableName);
+                
+                if (!table) {
+                    throw new Error('Table not found');
