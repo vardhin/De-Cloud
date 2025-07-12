@@ -9,7 +9,8 @@
         deleteTable,
         getRecords,
         insertRecord,
-        deleteRecord
+        deleteRecord,
+        getTableSchema
     } from '../../lib/databasemanager.js';
 
     let databases = [];
@@ -24,6 +25,7 @@
     let showCreateDbModal = false;
     let showAddTableModal = false;
     let showAddRecordModal = false;
+    let tableSchema = null;
 
     async function loadDatabases() {
         try {
@@ -69,17 +71,18 @@
     async function handleCreateDb() {
         if (!newDbName.trim()) return;
         try {
-            await createDatabase({
+            const res = await createDatabase({
                 schema: { name: newDbName, tables: [] },
                 requestedSpace: 1024 * 1024 * 10, // 10MB default
                 allocatedPeers: []
             });
+            if (res.error) throw new Error(res.error);
             status = `Database "${newDbName}" created`;
             newDbName = '';
             showCreateDbModal = false;
             await loadDatabases();
         } catch (e) {
-            status = 'Failed to create database';
+            status = 'Failed to create database: ' + e.message;
         }
     }
 
@@ -186,8 +189,9 @@
         </div>
     {/if}
 
+    <!-- Records Section -->
     {#if selectedTable}
-        <h4>Records in "{selectedTable}"</h4>
+        <h4>Records in "{selectedTable.name}"</h4>
         <button class="btn btn-secondary" on:click={() => showAddRecordModal = true}>Add Record</button>
         <table>
             <thead>
@@ -246,10 +250,15 @@
         <div class="modal-overlay" on:click={() => showAddRecordModal = false}>
             <div class="modal" on:click|stopPropagation>
                 <h3>Add Record</h3>
-                {#if tables.length > 0}
-                    {#each Object.keys(records[0] || {}) as key}
+                {#if records.length > 0}
+                    {#each Object.keys(records[0]) as key}
                         <input type="text" placeholder={key} bind:value={newRecord[key]} />
                     {/each}
+                {:else}
+                    <!-- Fallback: allow user to add key-value pairs manually -->
+                    <input type="text" placeholder="Field" bind:value={newRecord.field} />
+                    <input type="text" placeholder="Value" bind:value={newRecord.value} />
+                    <!-- You may want to add a button to add more fields -->
                 {/if}
                 <button class="btn btn-primary" on:click={handleAddRecord}>Add</button>
                 <button class="btn" on:click={() => showAddRecordModal = false}>Cancel</button>

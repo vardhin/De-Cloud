@@ -199,46 +199,66 @@ function retrieveArray(gun, basePath, timeout = 5000) {
     return new Promise((resolve) => {
         const items = [];
         const itemKeys = new Set();
-        
+
         console.log(`Retrieving items from: ${basePath}`);
-        
+
         let hasData = false;
-        
+
         const mainTimer = setTimeout(() => {
             console.log(`Timeout reached for ${basePath}, returning ${items.length} items`);
             resolve(items);
         }, timeout);
-        
-        gun.get(basePath).map().once((data, key) => {
+
+        gun.get(basePath).map().once(async (data, key) => {
             if (
                 data && key && key !== '_' && key !== '#' && key !== '>' &&
                 typeof data === 'object' && !Array.isArray(data)
             ) {
-                console.log(`Found item at ${basePath}/${key}:`, data);
-                
-                if (!itemKeys.has(key)) {
-                    itemKeys.add(key);
-                    
-                    // Clean Gun.js metadata
-                    const cleanData = {};
-                    Object.keys(data).forEach(prop => {
-                        if (prop !== '_' && prop !== '#' && prop !== '>') {
-                            cleanData[prop] = data[prop];
+                // If this is a Gun.js reference, resolve it
+                if (data['#'] && Object.keys(data).length === 1) {
+                    gun.get(data['#']).once((refData) => {
+                        if (
+                            refData &&
+                            typeof refData === 'object' &&
+                            !refData.deleted // <--- filter out deleted tables
+                        ) {
+                            if (!itemKeys.has(key)) {
+                                itemKeys.add(key);
+                                const cleanData = {};
+                                Object.keys(refData).forEach(prop => {
+                                    if (prop !== '_' && prop !== '#' && prop !== '>') {
+                                        cleanData[prop] = refData[prop];
+                                    }
+                                });
+                                if (!cleanData.name && !cleanData.id) {
+                                    cleanData.name = key;
+                                }
+                                items.push(cleanData);
+                                hasData = true;
+                                console.log(`Added referenced item: ${key}`, cleanData);
+                            }
                         }
                     });
-                    
-                    // Ensure the item has a name
-                    if (!cleanData.name && !cleanData.id) {
-                        cleanData.name = key;
+                } else if (!data.deleted) { // <--- filter out deleted tables
+                    if (!itemKeys.has(key)) {
+                        itemKeys.add(key);
+                        const cleanData = {};
+                        Object.keys(data).forEach(prop => {
+                            if (prop !== '_' && prop !== '#' && prop !== '>') {
+                                cleanData[prop] = data[prop];
+                            }
+                        });
+                        if (!cleanData.name && !cleanData.id) {
+                            cleanData.name = key;
+                        }
+                        items.push(cleanData);
+                        hasData = true;
+                        console.log(`Added item: ${key}`, cleanData);
                     }
-                    
-                    items.push(cleanData);
-                    hasData = true;
-                    console.log(`Added item: ${key}`, cleanData);
                 }
             }
         });
-        
+
         setTimeout(() => {
             if (hasData || items.length > 0) {
                 clearTimeout(mainTimer);
@@ -558,8 +578,10 @@ app.get('/database/:dbName/tables', async (req, res) => {
     }
     
     // Get all tables for this database
-    const tables = await retrieveArray(gun, `db/${dbName}/tables`, 5000);
-    
+    let tables = await retrieveArray(gun, `db/${dbName}/tables`, 5000);
+    // Filter out deleted tables
+    tables = tables.filter(table => !table.deleted);
+
     // For each table, load its columns and additional metadata
     const tablesWithDetails = await Promise.all(tables.map(async (table) => {
       const tableName = table.name || table._key;
@@ -579,7 +601,7 @@ app.get('/database/:dbName/tables', async (req, res) => {
           }, 2000);
 
           gun.get(recordsKey).map().once((data, key) => {
-            if (data && key && key !== '_' && typeof data === 'object') {
+            if (data && key && key !== '_' && typeof data === 'object' && !data.deleted) {
               recordMap.set(key, true);
             }
           });
@@ -778,6 +800,9 @@ app.get('/database/:dbName/:tableName', async (req, res) => {
           data && key && key !== '_' && key !== '#' && key !== '>' &&
           typeof data === 'object' && !Array.isArray(data)
         ) {
+          // Skip deleted records
+          if (data.deleted === true) return;
+
           console.log(`Found record ${key}:`, data);
 
           if (!recordKeys.has(key)) {
@@ -873,10 +898,10 @@ app.get('/databases', async (req, res) => {
                         }));
                         
                         const database = {
-                            ...cleanDbData,
-                            name: dbName,
-                            tables: tablesWithColumns,
-                            tablesCount: tablesWithColumns.length
+                          ...cleanDbData,
+                          name: dbName,
+                          tables: tablesWithColumns,
+                          tablesCount: tablesWithColumns.length
                         };
                         
                         databases.push(database);
@@ -977,56 +1002,6 @@ app.put('/database/:dbName/:tableName/:id', async (req, res) => {
   }
 });
 
-// Delete a record in a table
-app.delete('/database/:dbName/:tableName/:id', async (req, res) => {
-  try {
-    const { dbName, tableName, id } = req.params;
-    if (!dbName || !tableName || !id) {
-      return safeResponse(res, 400, { error: 'Database name, table name, and record ID are required' });
-    }
-    const recordKey = `db/${dbName}/tables/${tableName}/records/${id}`;
-    await gunOperation(() => gun.get(recordKey).put(null));
-    console.log('Record deleted successfully:', id);
-    safeResponse(res, 200, {
-      success: true,
-      message: 'Record deleted successfully',
-      id: id
-    });
-  } catch (error) {
-    console.error('Error deleting record:', error);
-    safeResponse(res, 500, { error: 'Failed to delete record: ' + error.message });
-  }
-});
-
-// Get schema for a table
-app.get('/database/:dbName/:tableName/schema', async (req, res) => {
-  try {
-    const { dbName, tableName } = req.params;
-    if (!dbName || !tableName) {
-      return safeResponse(res, 400, { error: 'Database and table name required' });
-    }
-    const columns = await retrieveArray(gun, `db/${dbName}/tables/${tableName}/columns`, 3000);
-    safeResponse(res, 200, { columns, count: columns.length });
-  } catch (error) {
-    safeResponse(res, 500, { error: 'Failed to fetch schema: ' + error.message });
-  }
-});
-
-
-// Delete a database
-app.delete('/database/:dbName', async (req, res) => {
-  try {
-    const { dbName } = req.params;
-    // Remove database metadata
-    await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`).put(null));
-    // Remove tables node
-    await gunOperation(() => gun.get(`db/${dbName}/tables`).put(null));
-    safeResponse(res, 200, { success: true, message: `Database ${dbName} deleted` });
-  } catch (error) {
-    safeResponse(res, 500, { error: 'Failed to delete database: ' + error.message });
-  }
-});
-
 // Delete a table from a database
 app.delete('/database/:dbName/table/:tableName', async (req, res) => {
   try {
@@ -1035,29 +1010,71 @@ app.delete('/database/:dbName/table/:tableName', async (req, res) => {
       return safeResponse(res, 400, { error: 'Database and table name required' });
     }
 
-    // Remove table metadata and all its data
-    await gunOperation(() => gun.get(`db/${dbName}/tables/${tableName}`).put(null));
-    await gunOperation(() => gun.get(`db/${dbName}/tables`).get(tableName).put(null));
+    // Mark table as deleted (logical delete)
+    await gunOperation(() => gun.get(`db/${dbName}/tables/${tableName}`).put({ deleted: true, deletedAt: new Date().toISOString() }));
 
-    // Optionally update database metadata (tablesCount)
-    const currentTables = await retrieveArray(gun, `db/${dbName}/tables`, 3000);
-    gun.get(`${DATABASES_KEY}/${dbName}`).once((dbData) => {
-      if (dbData) {
-        const updatedDbData = {
-          ...dbData,
-          tablesCount: currentTables.length,
-          updatedAt: new Date().toISOString()
-        };
-        gun.get(`${DATABASES_KEY}/${dbName}`).put(updatedDbData);
-      }
-    });
-
-    safeResponse(res, 200, { success: true, message: `Table ${tableName} deleted from ${dbName}` });
+    safeResponse(res, 200, { success: true, message: `Table ${tableName} marked as deleted in ${dbName}` });
   } catch (error) {
     safeResponse(res, 500, { error: 'Failed to delete table: ' + error.message });
   }
 });
 
+// Delete a database
+app.delete('/database/:dbName', async (req, res) => {
+  try {
+    const { dbName } = req.params;
+
+    // Check if database exists
+    const dbMeta = await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`));
+    if (!dbMeta || typeof dbMeta !== 'object') {
+      return safeResponse(res, 404, { error: `Database ${dbName} not found` });
+    }
+
+    // Recursively delete all tables and their data
+    await recursiveDelete(gun, `db/${dbName}`);
+
+    // Remove database metadata and reference
+    await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`).put({ _deleted: true }));
+    await new Promise(r => setTimeout(r, 200));
+    await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`).put(null));
+    await gunOperation(() => gun.get(DATABASES_KEY).get(dbName).put(null));
+
+    // Wait and check
+    let check = await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`));
+    if (check && typeof check === 'object') {
+      await safeDelete(gun.get(`${DATABASES_KEY}/${dbName}`));
+      await new Promise(r => setTimeout(r, 200));
+      check = await gunOperation(() => gun.get(`${DATABASES_KEY}/${dbName}`));
+    }
+
+    // Always return success, even if node still exists
+    safeResponse(res, 200, { success: true, message: `Database ${dbName} deleted (best effort)` });
+  } catch (error) {
+    safeResponse(res, 500, { error: 'Failed to delete database: ' + error.message });
+  }
+});
+
+// Delete a record in a table
+app.delete('/database/:dbName/:tableName/:id', async (req, res) => {
+  try {
+    const { dbName, tableName, id } = req.params;
+    if (!dbName || !tableName || !id) {
+      return safeResponse(res, 400, { error: 'Database name, table name, and record ID are required' });
+    }
+    const recordKey = `db/${dbName}/tables/${tableName}/records/${id}`;
+    // Mark as deleted (logical delete)
+    await gunOperation(() => gun.get(recordKey).put({ deleted: true, deletedAt: new Date().toISOString() }));
+
+    safeResponse(res, 200, {
+      success: true,
+      message: 'Record marked as deleted',
+      id: id
+    });
+  } catch (error) {
+    console.error('Error deleting record:', error);
+    safeResponse(res, 500, { error: 'Failed to delete record: ' + error.message });
+  }
+});
 // Rename a table in a database
 app.put('/database/:dbName/table/:tableName/rename', async (req, res) => {
   try {
@@ -1106,6 +1123,70 @@ app.put('/database/:dbName/table/:tableName/rename', async (req, res) => {
     safeResponse(res, 500, { error: 'Failed to rename table: ' + error.message });
   }
 });
+
+// Recursively delete all child nodes under a given path
+async function recursiveDelete(gun, path, visited = new Set()) {
+  // Prevent deleting the root node or any node that is the root or above
+  if (
+    !path ||
+    path === DATABASES_KEY ||
+    path === 'superpeer/databases' ||
+    path === '/' ||
+    path === '' ||
+    path === null ||
+    path === undefined
+  ) {
+    return;
+  }
+  // Prevent infinite loops
+  if (visited.has(path)) return;
+  visited.add(path);
+
+  return new Promise((resolve) => {
+    gun.get(path).once(async (data) => {
+      if (data && typeof data === 'object') {
+        const keys = Object.keys(data).filter(
+          (k) => !['_', '#', '>'].includes(k)
+        );
+        for (const key of keys) {
+          const value = data[key];
+          // Skip Gun.js references (links)
+          if (
+            value &&
+            typeof value === 'object' &&
+            Object.keys(value).length === 1 &&
+            value['#']
+          ) {
+            // This is a Gun.js reference, delete the reference
+            await gunOperation(() => gun.get(`${path}/${key}`).put(null));
+            continue;
+          }
+          // Prevent recursing into root or parent nodes
+          const childPath = `${path}/${key}`;
+          if (
+            childPath === DATABASES_KEY ||
+            childPath === 'superpeer/databases' ||
+            childPath === '/' ||
+            childPath === '' ||
+            childPath === null ||
+            childPath === undefined
+          ) {
+            continue;
+          }
+          await recursiveDelete(gun, childPath, visited);
+        }
+        // Only call .put(null) if this node is not a reference
+        if (!(Object.keys(data).length === 1 && data['#'])) {
+          gun.get(path).put(null, () => resolve());
+        } else {
+          resolve();
+        }
+      } else {
+        resolve();
+      }
+    });
+  });
+}
 
 // Global error handler
 app.use((error, req, res, next) => {
