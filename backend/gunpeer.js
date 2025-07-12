@@ -271,137 +271,144 @@ function retrieveArray(gun, basePath, timeout = 5000) {
 
 // Fix the Add table to existing database endpoint
 app.post('/database/:dbName/table', async (req, res) => {
-    try {
-        const { dbName } = req.params;
-        const tableData = req.body;
+  try {
+    const { dbName } = req.params;
+    const tableData = req.body;
 
-        console.log(`Adding table ${tableData.name} to database ${dbName}`);
-
-        if (!tableData.name) {
-            return safeResponse(res, 400, { error: 'Table name is required' });
-        }
-
-        // Check if database exists
-        const dbExists = await new Promise((resolve) => {
-            gun.get(`${DATABASES_KEY}/${dbName}`).once((data) => {
-                resolve(data && typeof data === 'object');
-            });
-        });
-
-        if (!dbExists) {
-            return safeResponse(res, 404, { error: 'Database not found' });
-        }
-
-        // Create table object with unique ID
-        const table = {
-            id: uuidv4(),
-            name: tableData.name,
-            columns: tableData.columns || [],
-            createdAt: new Date().toISOString()
-        };
-
-        // Store table data
-        const tablePath = `db/${dbName}/tables/${table.name}`;
-
-        console.log(`Storing table at ${tablePath}`);
-
-        // Store the table metadata first
-        const tableMetadata = {
-            id: table.id,
-            name: table.name,
-            createdAt: table.createdAt,
-            columnsCount: table.columns.length
-        };
-
-        await new Promise((resolve, reject) => {
-            gun.get(tablePath).put(tableMetadata, (ack) => {
-                if (ack.err) {
-                    console.error('Error storing table:', ack.err);
-                    reject(new Error('Failed to store table'));
-                } else {
-                    console.log(`Stored table at ${tablePath}`);
-                    resolve();
-                }
-            });
-        });
-
-        // Link the table as a reference under db/{dbName}/tables
-        await new Promise((resolve) => {
-            gun.get(`db/${dbName}/tables`).get(table.name).put(gun.get(tablePath), () => resolve());
-        });
-
-        // Store columns separately
-        if (table.columns && table.columns.length > 0) {
-            const columnPromises = table.columns.map((column) => {
-                const columnData = {
-                    id: column.id || uuidv4(),
-                    name: column.name,
-                    type: column.type || 'VARCHAR',
-                    length: column.length || null,
-                    createdAt: new Date().toISOString()
-                };
-                const columnKey = columnData.id;
-                const columnPath = `${tablePath}/columns/${columnKey}`;
-                return new Promise((resolve, reject) => {
-                    gun.get(columnPath).put(columnData, (columnAck) => {
-                        if (columnAck.err) {
-                            console.error(`Error storing column at ${columnPath}:`, columnAck.err);
-                            reject(new Error('Failed to store column'));
-                        } else {
-                            // Link parent to child
-                            gun.get(`${tablePath}/columns`).get(columnKey).put(gun.get(columnPath), () => resolve());
-                        }
-                    });
-                });
-            });
-
-            await Promise.all(columnPromises);
-
-            // Ensure columns parent node exists
-            await new Promise((resolve) => {
-                gun.get(`${tablePath}/columns`).put({ _exists: true }, () => resolve());
-            });
-        }
-
-        // Update database metadata to reflect new table count
-        try {
-            const currentTables = await retrieveArray(gun, `db/${dbName}/tables`, 3000);
-            const newTableCount = currentTables.length;
-
-            console.log(`Updating database ${dbName} table count to ${newTableCount}`);
-
-            gun.get(`${DATABASES_KEY}/${dbName}`).once((dbData) => {
-                if (dbData) {
-                    const updatedDbData = {
-                        ...dbData,
-                        tablesCount: newTableCount,
-                        updatedAt: new Date().toISOString()
-                    };
-
-                    gun.get(`${DATABASES_KEY}/${dbName}`).put(updatedDbData, (updateAck) => {
-                        if (updateAck.err) {
-                            console.error('Error updating database metadata:', updateAck.err);
-                        } else {
-                            console.log(`Updated database ${dbName} metadata`);
-                        }
-                    });
-                }
-            });
-        } catch (error) {
-            console.error('Error updating database metadata:', error);
-        }
-
-        console.log(`Table ${tableData.name} added to database ${dbName}`);
-        safeResponse(res, 200, {
-            success: true,
-            message: `Table "${tableData.name}" added successfully`,
-            table: table
-        });
-
-    } catch (error) {
-        console.error('Error adding table to database:', error);
-        safeResponse(res, 500, { error: 'Failed to add table: ' + error.message });
+    if (!tableData.name) {
+      return safeResponse(res, 400, { error: 'Table name is required' });
     }
+
+    // --- CLEAR OLD DATA ---
+    await gunOperation(() => gun.get(`db/${dbName}/tables/${tableData.name}`).put({
+      id: null,
+      name: null,
+      columns: null,
+      createdAt: null,
+      deleted: null
+    }));
+
+    // Check if database exists
+    const dbExists = await new Promise((resolve) => {
+      gun.get(`${DATABASES_KEY}/${dbName}`).once((data) => {
+        resolve(data && typeof data === 'object');
+      });
+    });
+
+    if (!dbExists) {
+      return safeResponse(res, 404, { error: 'Database not found' });
+    }
+
+    // Create table object with unique ID
+    const table = {
+      id: uuidv4(),
+      name: tableData.name,
+      columns: tableData.columns || [],
+      createdAt: new Date().toISOString()
+    };
+
+    // Store table data
+    const tablePath = `db/${dbName}/tables/${table.name}`;
+
+    console.log(`Storing table at ${tablePath}`);
+
+    // Store the table metadata first
+    const tableMetadata = {
+      id: table.id,
+      name: table.name,
+      createdAt: table.createdAt,
+      columnsCount: table.columns.length
+    };
+
+    await new Promise((resolve, reject) => {
+      gun.get(tablePath).put(tableMetadata, (ack) => {
+        if (ack.err) {
+          console.error('Error storing table:', ack.err);
+          reject(new Error('Failed to store table'));
+        } else {
+          console.log(`Stored table at ${tablePath}`);
+          resolve();
+        }
+      });
+    });
+
+    // Link the table as a reference under db/{dbName}/tables
+    await new Promise((resolve) => {
+      gun.get(`db/${dbName}/tables`).get(table.name).put(gun.get(tablePath), () => resolve());
+    });
+
+    // Store columns separately
+    if (table.columns && table.columns.length > 0) {
+      const columnPromises = table.columns.map((column) => {
+        const columnData = {
+          id: column.id || uuidv4(),
+          name: column.name,
+          type: column.type || 'VARCHAR',
+          length: column.length || null,
+          createdAt: new Date().toISOString()
+        };
+        const columnKey = columnData.id;
+        const columnPath = `${tablePath}/columns/${columnKey}`;
+        return new Promise((resolve, reject) => {
+          gun.get(columnPath).put(columnData, (columnAck) => {
+            if (columnAck.err) {
+              console.error(`Error storing column at ${columnPath}:`, columnAck.err);
+              reject(new Error('Failed to store column'));
+            } else {
+              // Link parent to child
+              gun.get(`${tablePath}/columns`).get(columnKey).put(gun.get(columnPath), () => resolve());
+            }
+          });
+        });
+      });
+
+      await Promise.all(columnPromises);
+
+      // Ensure columns parent node exists
+      await new Promise((resolve) => {
+        gun.get(`${tablePath}/columns`).put({ _exists: true }, () => resolve());
+      });
+    }
+
+    // Update database metadata to reflect new table count
+    try {
+      const currentTables = await retrieveArray(gun, `db/${dbName}/tables`, 3000);
+      const newTableCount = currentTables.length;
+
+      console.log(`Updating database ${dbName} table count to ${newTableCount}`);
+
+      gun.get(`${DATABASES_KEY}/${dbName}`).once((dbData) => {
+        if (dbData) {
+          const updatedDbData = {
+            ...dbData,
+            tablesCount: newTableCount,
+            updatedAt: new Date().toISOString()
+          };
+
+          gun.get(`${DATABASES_KEY}/${dbName}`).put(updatedDbData, (updateAck) => {
+            if (updateAck.err) {
+              console.error('Error updating database metadata:', updateAck.err);
+            } else {
+              console.log(`Updated database ${dbName} metadata`);
+            }
+          });
+        }
+      });
+    } catch (error) {
+      console.error('Error updating database metadata:', error);
+    }
+
+    console.log(`Table ${tableData.name} added to database ${dbName}`);
+    safeResponse(res, 200, {
+      success: true,
+      message: `Table "${tableData.name}" added successfully`,
+      table: table
+    });
+
+  } catch (error) {
+    console.error('Error adding table to database:', error);
+    safeResponse(res, 500, { error: 'Failed to add table: ' + error.message });
+  }
 });
 
 // Health check endpoint
@@ -657,12 +664,25 @@ app.get('/database/:dbName/tables', async (req, res) => {
 app.post('/database/create', async (req, res) => {
   try {
     console.log('Superpeer: Received database creation request');
-    
     const { schema, requestedSpace, allocatedPeers } = req.body;
-    
+
     if (!schema || !schema.name) {
       return safeResponse(res, 400, { error: 'Schema with name required' });
     }
+
+    // --- CLEAR OLD DATA ---
+    await gunOperation(() => gun.get(`${DATABASES_KEY}/${schema.name}`).put({
+      id: null,
+      name: null,
+      tablesCount: null,
+      createdAt: null,
+      requestedSpace: null,
+      usedSpace: null,
+      allocatedPeersCount: null,
+      storageDistributionCount: null,
+      deleted: null,
+      _deleted: null
+    }));
 
     const tables = Array.isArray(schema.tables) ? schema.tables : [];
     console.log(`Creating database: ${schema.name} with ${tables.length} tables`);
@@ -941,11 +961,20 @@ app.post('/database/:dbName/:tableName', async (req, res) => {
     if (!dbName || !tableName || !record) {
       return safeResponse(res, 400, { error: 'Database, table, and record required' });
     }
+
     // Ensure parent node exists as an object
     await gunOperation(() => gun.get(`db/${dbName}/tables/${tableName}/records`).put({ _exists: true }));
 
     // Generate a unique ID if not provided
     const id = record.id || uuidv4();
+
+    // --- CLEAR OLD DATA ---
+    await gunOperation(() => gun.get(`db/${dbName}/tables/${tableName}/records/${id}`).put({
+      id: null,
+      createdAt: null,
+      deleted: null
+    }));
+
     record.id = id;
     record.createdAt = new Date().toISOString();
 
