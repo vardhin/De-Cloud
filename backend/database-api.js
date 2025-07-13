@@ -29,6 +29,7 @@ function getNeDB(dbName) {
 const metaFile = path.join(__dirname, "data", "databases-meta.json");
 function loadMeta() {
     if (!fs.existsSync(metaFile)) return {};
+    if (!fs.statSync(metaFile).isFile()) return {}; // <-- Add this check
     return JSON.parse(fs.readFileSync(metaFile, "utf8"));
 }
 function saveMeta(meta) {
@@ -274,6 +275,26 @@ function registerDatabaseApi(app) {
                 success: true,
                 message: `Table renamed from ${tableName} to ${newName}`,
             });
+        });
+    });
+
+    // Get disk usage for a database
+    app.get("/database/:dbName/usage", (req, res) => {
+        const { dbName } = req.params;
+        const dbDir = path.join(__dirname, "data", dbName);
+        const dbFile = path.join(dbDir, "nedb.db");
+        if (!fs.existsSync(dbDir)) {
+            return safeResponse(res, 404, { error: "Database not found" });
+        }
+        let sizeBytes = 0;
+        if (fs.existsSync(dbFile)) {
+            const stats = fs.statSync(dbFile);
+            sizeBytes = stats.size;
+        }
+        safeResponse(res, 200, {
+            database: dbName,
+            diskUsageBytes: sizeBytes,
+            diskUsageMB: (sizeBytes / (1024 * 1024)).toFixed(3),
         });
     });
 }

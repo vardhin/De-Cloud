@@ -10,6 +10,12 @@ const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const ioClient = require('socket.io-client');
 const os = require('os');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const registerProxyApi = require('./proxy-api');
+
+
+// Import DB API handler functions
+const { registerDatabaseApi, createDatabase, insertRecord, updateRecord, deleteRecord, addTable, deleteTable, renameTable } = require('./database-api');
 
 const app = express();
 app.use(cors());
@@ -18,12 +24,28 @@ app.use(express.json());
 const SUPER_PEER_URL = 'https://test.vardhin.tech/gun';
 const SUPER_PEER_API_URL = SUPER_PEER_URL.replace(/\/gun$/, '');
 
+
+const containers = {};
+const containerResources = {};
+const containerSecrets = {};
+const dockerUtil = new DockerUtility();
+
+let availableRam = null;
+let availableStorage = null;
+let totalRam = null;
+let totalStorage = null;
+
+
 // Connect to the super peer (relay)
 const gun = Gun({
   peers: [SUPER_PEER_URL],
   radisk: true,
   file: 'client-data'
 });
+
+// Register local DB API endpoints for this peer
+registerDatabaseApi(app);
+registerProxyApi(app, SUPER_PEER_API_URL);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -53,170 +75,6 @@ app.get('/read/:key', (req, res) => {
     res.json({ data });
   });
 });
-
-// ======================
-// DATABASE PROXY ENDPOINTS
-// ======================
-
-// Proxy: Create database from schema
-app.post('/database/create', async (req, res) => {
-  try {
-    console.log('Received database creation request:', JSON.stringify(req.body, null, 2));
-    
-    // Validate request body
-    if (!req.body || typeof req.body !== 'object') {
-      return res.status(400).json({ error: 'Invalid request body' });
-    }
-    
-    const { schema, requestedSpace, allocatedPeers } = req.body;
-    
-    if (!schema || !schema.name) {
-      return res.status(400).json({ error: 'Schema with name is required' });
-    }
-    
-    if (!requestedSpace || typeof requestedSpace !== 'number' || requestedSpace <= 0) {
-      return res.status(400).json({ error: 'Valid requestedSpace is required' });
-    }
-    
-    console.log('Forwarding request to superpeer:', SUPER_PEER_API_URL);
-    
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/create`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    
-    console.log('Superpeer response status:', response.status);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Superpeer error response:', errorText);
-      return res.status(response.status).json({ 
-        error: `Superpeer error: ${errorText}` 
-      });
-    }
-    
-    const data = await response.json();
-    console.log('Superpeer success response:', data);
-    
-    res.json(data);
-  } catch (error) {
-    console.error('Database creation proxy error:', error);
-    res.status(500).json({ 
-      error: 'Failed to connect to superpeer: ' + error.message 
-    });
-  }
-});
-
-// Proxy: List all databases
-app.get('/databases', async (req, res) => {
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/databases`);
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: INSERT - Create new record
-app.post('/database/:dbName/:tableName', async (req, res) => {
-  const { dbName, tableName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: SELECT - Read records
-app.get('/database/:dbName/:tableName', async (req, res) => {
-  const { dbName, tableName } = req.params;
-  const queryParams = new URLSearchParams(req.query).toString();
-  const url = `${SUPER_PEER_API_URL}/database/${dbName}/${tableName}${queryParams ? '?' + queryParams : ''}`;
-  
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: UPDATE - Update record
-app.put('/database/:dbName/:tableName/:id', async (req, res) => {
-  const { dbName, tableName, id } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: DELETE - Delete record
-app.delete('/database/:dbName/:tableName/:id', async (req, res) => {
-  const { dbName, tableName, id } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/${id}`, {
-      method: 'DELETE'
-    });
-    let data = await response.json();
-    // Standardize message
-    if (data && data.success) {
-      data.message = data.message || `Record ${id} deleted successfully`;
-    }
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Add proxy for database deletion
-app.delete('/database/:dbName', async (req, res) => {
-  const { dbName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}`, {
-      method: 'DELETE'
-    });
-    let data = await response.json();
-    // Standardize message
-    if (data && data.success) {
-      data.message = data.message || `Database ${dbName} deleted successfully`;
-    }
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: Get table schema
-app.get('/database/:dbName/:tableName/schema', async (req, res) => {
-  const { dbName, tableName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/${tableName}/schema`);
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// ======================
-// RESOURCE MONITORING ENDPOINTS
-// ======================
 
 // Get superpeer resources and stats
 app.get('/superpeer/resources', async (req, res) => {
@@ -424,28 +282,6 @@ app.post('/network/check-allocation', async (req, res) => {
   }
 });
 
-// ======================
-// EXISTING CODE CONTINUES...
-// ======================
-
-async function getResourceInfo() {
-  const mem = await si.mem();
-  const disks = await si.fsSize();
-  const disk = disks.reduce((a, b) => (a.size > b.size ? a : b), { size: 0, available: 0 });
-  const gpu = (await si.graphics()).controllers[0] || {};
-  const cpu = await si.cpu();
-  return {
-    name: peerConfig.name || 'unnamed-peer',
-    totalRam: mem.total,
-    availableRam: mem.available,
-    totalStorage: disk.size || 0,
-    availableStorage: disk.available || 0,
-    gpu: gpu.model || 'none',
-    cpuCores: cpu.cores,
-    cpuThreads: cpu.processors || cpu.physicalCores || cpu.cores
-  };
-}
-
 async function isSuperPeerAvailable() {
   try {
     console.log('Checking superpeer availability at:', SUPER_PEER_API_URL);
@@ -476,16 +312,6 @@ async function isSuperPeerAvailable() {
     return false;
   }
 }
-
-const containers = {};
-const containerResources = {};
-const containerSecrets = {};
-const dockerUtil = new DockerUtility();
-
-let availableRam = null;
-let availableStorage = null;
-let totalRam = null;
-let totalStorage = null;
 
 async function updateAvailableResources() {
     try {
@@ -1190,73 +1016,47 @@ app.get('/test-superpeer', async (req, res) => {
   }
 });
 
-// Proxy: Get all tables in a database
-app.get('/database/:dbName/tables', async (req, res) => {
-  const { dbName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/tables`);
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
+// Helper: Listen for DB ops via Gun.js and call local DB API handlers
+function listenForDbOps() {
+    const peerName = peerConfig.name || 'unnamed-peer';
+    gun.get(`db-op/${peerName}`).map().on(async (op) => {
+        if (!op || !op.type) return;
+        console.log(`[DB-OP] Received operation:`, op);
 
-// Proxy: Delete a table from a database
-app.delete('/database/:dbName/table/:tableName', async (req, res) => {
-  const { dbName, tableName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/table/${tableName}`, {
-      method: 'DELETE'
+        try {
+            if (op.type === "create") {
+                // { schema, requestedSpace, allocatedPeers }
+                await createDatabase(op);
+                console.log(`[DB-OP] Database created: ${op.schema && op.schema.name}`);
+            } else if (op.type === "insert") {
+                // { dbName, tableName, record }
+                await insertRecord(op);
+                console.log(`[DB-OP] Record inserted into ${op.dbName}.${op.tableName}`);
+            } else if (op.type === "update") {
+                // { dbName, tableName, id, updateData }
+                await updateRecord(op);
+                console.log(`[DB-OP] Record updated in ${op.dbName}.${op.tableName}`);
+            } else if (op.type === "delete") {
+                // { dbName, tableName, id }
+                await deleteRecord(op);
+                console.log(`[DB-OP] Record deleted in ${op.dbName}.${op.tableName}`);
+            } else if (op.type === "add_table") {
+                // { dbName, tableData }
+                await addTable(op);
+                console.log(`[DB-OP] Table added in ${op.dbName}`);
+            } else if (op.type === "delete_table") {
+                // { dbName, tableName }
+                await deleteTable(op);
+                console.log(`[DB-OP] Table deleted in ${op.dbName}`);
+            } else if (op.type === "rename_table") {
+                // { dbName, tableName, newName }
+                await renameTable(op);
+                console.log(`[DB-OP] Table renamed in ${op.dbName}`);
+            }
+            // Add more as needed
+        } catch (e) {
+            console.error('[DB-OP] Handler error:', e);
+        }
     });
-    let data = await response.json();
-    // Standardize message
-    if (data && data.success) {
-      data.message = data.message || `Table ${tableName} deleted successfully`;
-    }
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Proxy: Rename a table in a database
-app.put('/database/:dbName/table/:tableName/rename', async (req, res) => {
-  const { dbName, tableName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/table/${tableName}/rename`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    // Ensure response is JSON
-    const contentType = response.headers.get('content-type');
-    let data;
-    if (contentType && contentType.includes('application/json')) {
-      data = await response.json();
-    } else {
-      data = { error: await response.text() };
-    }
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
-// Add proxy for adding table to database
-app.post('/database/:dbName/table', async (req, res) => {
-  const { dbName } = req.params;
-  try {
-    const response = await fetch(`${SUPER_PEER_API_URL}/database/${dbName}/table`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to connect to superpeer: ' + error.message });
-  }
-});
-
+}
 module.exports = { app, gun };

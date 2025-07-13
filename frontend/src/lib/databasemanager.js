@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:8766'; // Change if your backend runs elsewhere
+const API_BASE = 'http://localhost:8766/proxy'; // Change if your backend runs elsewhere
 
 // Centralized logger for API actions
 function logApiAction(action, details = {}) {
