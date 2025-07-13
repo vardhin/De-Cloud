@@ -160,18 +160,12 @@ app.post('/register', async (req, res) => {
 app.get('/peers', async (req, res) => {
   try {
     const now = Date.now();
-    const peers = [];
     const peerMap = new Map();
-    let responseTimeout;
+    let responded = false;
 
-    responseTimeout = setTimeout(() => {
-      if (!res.headersSent) {
-        console.log('Peers endpoint timeout, returning collected peers');
-        safeResponse(res, 200, { peers: Array.from(peerMap.values()) });
-      }
-    }, 3000);
-
-    gun.get(PEER_DB_KEY).map().on((peer, key) => {
+    // Gun.js subscription
+    const gunMap = gun.get(PEER_DB_KEY).map();
+    const handler = gunMap.on((peer, key) => {
       try {
         if (peer && peer.name && peer.lastSeen && now - peer.lastSeen < 2 * 60 * 1000) {
           peerMap.set(key, {
@@ -185,12 +179,31 @@ app.get('/peers', async (req, res) => {
       }
     });
 
+    // Respond after 2 seconds
     setTimeout(() => {
-      if (!res.headersSent) {
-        clearTimeout(responseTimeout);
+      if (!responded) {
+        responded = true;
+        gunMap.off(); // Unsubscribe
         safeResponse(res, 200, { peers: Array.from(peerMap.values()) });
       }
     }, 2000);
+
+    // Safety: respond after 3 seconds if not already
+    setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        gunMap.off();
+        safeResponse(res, 200, { peers: Array.from(peerMap.values()) });
+      }
+    }, 3000);
+
+    // If client disconnects, clean up
+    req.on('close', () => {
+      if (!responded) {
+        responded = true;
+        gunMap.off();
+      }
+    });
 
   } catch (error) {
     console.error('Error fetching peers:', error);

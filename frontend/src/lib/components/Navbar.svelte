@@ -48,12 +48,6 @@
         <Settings size="16" /> Register
     </a>
     <a 
-        href="/schemas" 
-        class="tab-button {$page.url.pathname === '/schemas' ? 'active' : ''}"
-    >
-        <Database size="16" /> Schemas
-    </a>
-    <a 
         href="/database" 
         class="tab-button {$page.url.pathname === '/database' ? 'active' : ''}"
     >

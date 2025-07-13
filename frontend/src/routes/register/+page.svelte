@@ -146,7 +146,7 @@
         <div class="form-section">
             <label class="form-label">
                 Peer Name
-                <input class="form-input" type="text" bind:value={peerName} placeholder="Enter your peer name" />
+                <input class="form-input" type="text" bind:value={registrationManager.peerName} placeholder="Enter your peer name" />
             </label>
         </div>
 
