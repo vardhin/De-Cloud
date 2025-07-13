@@ -1,5 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
-
+const fs = require("fs");
+const path = require("path");
+const Datastore = require("@seald-io/nedb");
 // Utility function to safely send response
 function safeResponse(res, status, data) {
     if (!res.headersSent) {
@@ -11,875 +13,268 @@ function safeResponse(res, status, data) {
     }
 }
 
-// Gun.js operation utility
-function gunOperation(gun, operation, timeout = 10000) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            reject(new Error("Gun operation timeout"));
-        }, timeout);
-
-        try {
-            let completed = false;
-            const callback = (result, error) => {
-                if (completed) return;
-                completed = true;
-                clearTimeout(timer);
-                if (error) {
-                    reject(new Error("Gun operation failed: " + error));
-                } else {
-                    resolve(result);
-                }
-            };
-
-            const gunRef = operation();
-            if (gunRef && typeof gunRef.then === "function") {
-                gunRef
-                    .then((result) => callback(result))
-                    .catch((error) => callback(null, error));
-            } else if (gunRef && typeof gunRef.once === "function") {
-                gunRef.once((data, key) => {
-                    callback(data);
-                });
-            } else {
-                callback(gunRef);
-            }
-        } catch (error) {
-            clearTimeout(timer);
-            reject(error);
-        }
-    });
-}
-
-// Retrieve array utility
-function retrieveArray(gun, basePath, timeout = 5000) {
-    return new Promise((resolve) => {
-        const items = [];
-        const itemKeys = new Set();
-        let hasData = false;
-        const mainTimer = setTimeout(() => resolve(items), timeout);
-
-        gun
-            .get(basePath)
-            .map()
-            .once(async (data, key) => {
-                if (
-                    data &&
-                    key &&
-                    key !== "_" &&
-                    key !== "#" &&
-                    key !== ">" &&
-                    typeof data === "object" &&
-                    !Array.isArray(data)
-                ) {
-                    if (data["#"] && Object.keys(data).length === 1) {
-                        gun.get(data["#"]).once((refData) => {
-                            if (refData && typeof refData === "object" && !refData.deleted) {
-                                if (!itemKeys.has(key)) {
-                                    itemKeys.add(key);
-                                    const cleanData = {};
-                                    Object.keys(refData).forEach((prop) => {
-                                        if (prop !== "_" && prop !== "#" && prop !== ">") {
-                                            cleanData[prop] = refData[prop];
-                                        }
-                                    });
-                                    if (!cleanData.name && !cleanData.id) {
-                                        cleanData.name = key;
-                                    }
-                                    items.push(cleanData);
-                                    hasData = true;
-                                }
-                            }
-                        });
-                    } else if (!data.deleted) {
-                        if (!itemKeys.has(key)) {
-                            itemKeys.add(key);
-                            const cleanData = {};
-                            Object.keys(data).forEach((prop) => {
-                                if (prop !== "_" && prop !== "#" && prop !== ">") {
-                                    cleanData[prop] = data[prop];
-                                }
-                            });
-                            if (!cleanData.name && !cleanData.id) {
-                                cleanData.name = key;
-                            }
-                            items.push(cleanData);
-                            hasData = true;
-                        }
-                    }
-                }
-            });
-
-        setTimeout(() => {
-            if (hasData || items.length > 0) {
-                clearTimeout(mainTimer);
-                resolve(items);
-            }
-        }, Math.min(timeout - 500, 2000));
-    });
-}
-
-// Recursively delete all child nodes under a given path
-async function recursiveDelete(gun, path, DATABASES_KEY, visited = new Set()) {
-    if (
-        !path ||
-        path === DATABASES_KEY ||
-        path === "superpeer/databases" ||
-        path === "/" ||
-        path === "" ||
-        path === null ||
-        path === undefined
-    ) {
-        return;
+// Helper to get or create a NeDB instance for a database
+const nedbInstances = {};
+function getNeDB(dbName) {
+    const dbDir = path.join(__dirname, "data", dbName);
+    if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+    const dbFile = path.join(dbDir, "nedb.db");
+    if (!nedbInstances[dbName]) {
+        nedbInstances[dbName] = new Datastore({ filename: dbFile, autoload: true });
     }
-    if (visited.has(path)) return;
-    visited.add(path);
-
-    return new Promise((resolve) => {
-        gun.get(path).once(async (data) => {
-            if (data && typeof data === "object") {
-                const keys = Object.keys(data).filter(
-                    (k) => !["_", "#", ">"].includes(k)
-                );
-                for (const key of keys) {
-                    const value = data[key];
-                    if (
-                        value &&
-                        typeof value === "object" &&
-                        Object.keys(value).length === 1 &&
-                        value["#"]
-                    ) {
-                        await gunOperation(gun, () => gun.get(`${path}/${key}`).put(null));
-                        continue;
-                    }
-                    const childPath = `${path}/${key}`;
-                    if (
-                        childPath === DATABASES_KEY ||
-                        childPath === "superpeer/databases" ||
-                        childPath === "/" ||
-                        childPath === "" ||
-                        childPath === null ||
-                        childPath === undefined
-                    ) {
-                        continue;
-                    }
-                    await recursiveDelete(gun, childPath, DATABASES_KEY, visited);
-                }
-                if (!(Object.keys(data).length === 1 && data["#"])) {
-                    gun.get(path).put(null, () => resolve());
-                } else {
-                    resolve();
-                }
-            } else {
-                resolve();
-            }
-        });
-    });
+    return nedbInstances[dbName];
 }
 
-// Only call .put(null) if node exists
-async function safeDelete(node) {
-    return new Promise((resolve) => {
-        node.once((data) => {
-            if (data && typeof data === "object") {
-                node.put(null, () => resolve());
-            } else {
-                resolve();
-            }
-        });
-    });
+// Helper to get metadata file for all databases
+const metaFile = path.join(__dirname, "data", "databases-meta.json");
+function loadMeta() {
+    if (!fs.existsSync(metaFile)) return {};
+    return JSON.parse(fs.readFileSync(metaFile, "utf8"));
+}
+function saveMeta(meta) {
+    fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2));
 }
 
-function registerDatabaseApi(app, gun, options = {}) {
-    const DATABASES_KEY = options.DATABASES_KEY || "superpeer/databases";
-
-    // Add table to existing database
-    app.post("/database/:dbName/table", async (req, res) => {
-        try {
-            const { dbName } = req.params;
-            const tableData = req.body;
-
-            if (!tableData.name) {
-                return safeResponse(res, 400, { error: "Table name is required" });
-            }
-
-            await gunOperation(gun, () =>
-                gun.get(`db/${dbName}/tables/${tableData.name}`).put({
-                    id: null,
-                    name: null,
-                    columns: null,
-                    createdAt: null,
-                    deleted: null,
-                })
-            );
-
-            const dbExists = await new Promise((resolve) => {
-                gun.get(`${DATABASES_KEY}/${dbName}`).once((data) => {
-                    resolve(data && typeof data === "object");
-                });
-            });
-
-            if (!dbExists) {
-                return safeResponse(res, 404, { error: "Database not found" });
-            }
-
-            const table = {
-                id: uuidv4(),
-                name: tableData.name,
-                columns: tableData.columns || [],
-                createdAt: new Date().toISOString(),
-            };
-
-            const tablePath = `db/${dbName}/tables/${table.name}`;
-            const tableMetadata = {
-                id: table.id,
-                name: table.name,
-                createdAt: table.createdAt,
-                columnsCount: table.columns.length,
-            };
-
-            await new Promise((resolve, reject) => {
-                gun.get(tablePath).put(tableMetadata, (ack) => {
-                    if (ack.err) reject(new Error("Failed to store table"));
-                    else resolve();
-                });
-            });
-
-            await new Promise((resolve) => {
-                gun
-                    .get(`db/${dbName}/tables`)
-                    .get(table.name)
-                    .put(gun.get(tablePath), () => resolve());
-            });
-
-            if (table.columns && table.columns.length > 0) {
-                const columnPromises = table.columns.map((column) => {
-                    const columnData = {
-                        id: column.id || uuidv4(),
-                        name: column.name,
-                        type: column.type || "VARCHAR",
-                        length: column.length || null,
-                        createdAt: new Date().toISOString(),
-                    };
-                    const columnKey = columnData.id;
-                    const columnPath = `${tablePath}/columns/${columnKey}`;
-                    return new Promise((resolve, reject) => {
-                        gun.get(columnPath).put(columnData, (columnAck) => {
-                            if (columnAck.err) reject(new Error("Failed to store column"));
-                            else
-                                gun
-                                    .get(`${tablePath}/columns`)
-                                    .get(columnKey)
-                                    .put(gun.get(columnPath), () => resolve());
-                        });
-                    });
-                });
-
-                await Promise.all(columnPromises);
-
-                await new Promise((resolve) => {
-                    gun
-                        .get(`${tablePath}/columns`)
-                        .put({ _exists: true }, () => resolve());
-                });
-            }
-
-            try {
-                const currentTables = await retrieveArray(
-                    gun,
-                    `db/${dbName}/tables`,
-                    3000
-                );
-                const newTableCount = currentTables.length;
-
-                gun.get(`${DATABASES_KEY}/${dbName}`).once((dbData) => {
-                    if (dbData) {
-                        const updatedDbData = {
-                            ...dbData,
-                            tablesCount: newTableCount,
-                            updatedAt: new Date().toISOString(),
-                        };
-                        gun.get(`${DATABASES_KEY}/${dbName}`).put(updatedDbData);
-                    }
-                });
-            } catch (error) { }
-
-            safeResponse(res, 200, {
-                success: true,
-                message: `Table "${tableData.name}" added successfully`,
-                table: table,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to add table: " + error.message,
+function registerDatabaseApi(app) {
+    // List all databases (by scanning data folder)
+    app.get("/databases", (req, res) => {
+        const dataDir = path.join(__dirname, "data");
+        let dbFolders = [];
+        if (fs.existsSync(dataDir)) {
+            dbFolders = fs.readdirSync(dataDir).filter((file) => {
+                const fullPath = path.join(dataDir, file);
+                return fs.statSync(fullPath).isDirectory();
             });
         }
-    });
-
-    // Get all tables for a specific database
-    app.get("/database/:dbName/tables", async (req, res) => {
-        try {
-            const { dbName } = req.params;
-            if (!dbName)
-                return safeResponse(res, 400, { error: "Database name is required" });
-
-            const dbExists = await new Promise((resolve) => {
-                gun.get(`${DATABASES_KEY}/${dbName}`).once((data) => {
-                    resolve(data && typeof data === "object");
-                });
-            });
-
-            if (!dbExists)
-                return safeResponse(res, 404, { error: "Database not found" });
-
-            let tables = await retrieveArray(gun, `db/${dbName}/tables`, 5000);
-            tables = tables.filter((table) => !table.deleted);
-
-            const tablesWithDetails = await Promise.all(
-                tables.map(async (table) => {
-                    const tableName = table.name || table._key;
-                    try {
-                        const columns = await retrieveArray(
-                            gun,
-                            `db/${dbName}/tables/${tableName}/columns`,
-                            3000
-                        );
-                        const recordCount = await new Promise((resolve) => {
-                            const recordMap = new Map();
-                            const recordsKey = `db/${dbName}/tables/${tableName}/records`;
-                            gun
-                                .get(recordsKey)
-                                .map()
-                                .once((data, key) => {
-                                    if (
-                                        data &&
-                                        key &&
-                                        key !== "_" &&
-                                        typeof data === "object" &&
-                                        !data.deleted
-                                    ) {
-                                        recordMap.set(key, true);
-                                    }
-                                });
-                            setTimeout(() => resolve(recordMap.size), 1500);
-                        });
-                        return {
-                            id: table.id || uuidv4(),
-                            name: tableName,
-                            columns: columns,
-                            columnsCount: columns.length,
-                            recordCount: recordCount,
-                            createdAt: table.createdAt || null,
-                            updatedAt: table.updatedAt || null,
-                        };
-                    } catch (error) {
-                        return {
-                            id: table.id || uuidv4(),
-                            name: tableName,
-                            columns: [],
-                            columnsCount: 0,
-                            recordCount: 0,
-                            createdAt: table.createdAt || null,
-                            updatedAt: table.updatedAt || null,
-                            error: "Failed to load table details",
-                        };
-                    }
-                })
-            );
-
-            safeResponse(res, 200, {
-                database: dbName,
-                tables: tablesWithDetails,
-                count: tablesWithDetails.length,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to fetch tables: " + error.message,
-            });
-        }
+        const meta = loadMeta();
+        const databases = dbFolders.map((dbName) => ({
+            name: dbName,
+            ...(meta[dbName] || {}),
+        }));
+        safeResponse(res, 200, { databases, count: databases.length });
     });
 
     // Create database from schema
-    app.post("/database/create", async (req, res) => {
-        try {
-            const { schema, requestedSpace, allocatedPeers } = req.body;
-            if (!schema || !schema.name) {
-                return safeResponse(res, 400, { error: "Schema with name required" });
-            }
-
-            await gunOperation(gun, () =>
-                gun.get(`${DATABASES_KEY}/${schema.name}`).put({
-                    id: null,
-                    name: null,
-                    tablesCount: null,
-                    createdAt: null,
-                    requestedSpace: null,
-                    usedSpace: null,
-                    allocatedPeersCount: null,
-                    storageDistributionCount: null,
-                    deleted: null,
-                    _deleted: null,
-                })
-            );
-
-            const tables = Array.isArray(schema.tables) ? schema.tables : [];
-            const dbMetadata = {
-                id: schema.id || uuidv4(),
-                name: schema.name,
-                tablesCount: tables.length,
-                createdAt: new Date().toISOString(),
-                requestedSpace: requestedSpace || 0,
-                usedSpace: 0,
-                allocatedPeersCount: Array.isArray(allocatedPeers)
-                    ? allocatedPeers.length
-                    : 0,
-                storageDistributionCount: 0,
-            };
-
-            await new Promise((resolve, reject) => {
-                gun
-                    .get(DATABASES_KEY)
-                    .get(schema.name)
-                    .put(dbMetadata, (ack) => {
-                        if (ack.err) reject(new Error("Failed to store database metadata"));
-                        else resolve();
-                    });
-            });
-
-            for (const table of tables) {
-                if (table && table.name) {
-                    const tableData = {
-                        id: table.id || uuidv4(),
-                        name: table.name,
-                        columnsCount: Array.isArray(table.columns)
-                            ? table.columns.length
-                            : 0,
-                        createdAt: new Date().toISOString(),
-                        _type: "table",
-                    };
-                    const tablePath = `db/${schema.name}/tables/${table.name}`;
-                    await new Promise((resolve, reject) => {
-                        gun.get(tablePath).put(tableData, (ack) => {
-                            if (ack.err)
-                                reject(new Error(`Failed to store table ${table.name}`));
-                            else resolve();
-                        });
-                    });
-                    await new Promise((resolve) => {
-                        gun
-                            .get(`db/${schema.name}/tables`)
-                            .get(table.name)
-                            .put(gun.get(tablePath), () => resolve());
-                    });
-                    if (Array.isArray(table.columns) && table.columns.length > 0) {
-                        await Promise.all(
-                            table.columns.map(async (column) => {
-                                const columnData = {
-                                    id: column.id || uuidv4(),
-                                    name: column.name,
-                                    type: column.type || "VARCHAR",
-                                    length: column.length || null,
-                                    createdAt: new Date().toISOString(),
-                                };
-                                const columnPath = `${tablePath}/columns/${columnData.id}`;
-                                await new Promise((resolve, reject) => {
-                                    gun.get(columnPath).put(columnData, (ack) => {
-                                        if (ack.err)
-                                            reject(
-                                                new Error(`Failed to store column ${column.name}`)
-                                            );
-                                        else
-                                            gun
-                                                .get(`${tablePath}/columns`)
-                                                .get(columnData.id)
-                                                .put(gun.get(columnPath), () => resolve());
-                                    });
-                                });
-                            })
-                        );
-                        await new Promise((resolve) => {
-                            gun
-                                .get(`${tablePath}/columns`)
-                                .put({ _exists: true }, () => resolve());
-                        });
-                    }
-                }
-            }
-
-            safeResponse(res, 200, {
-                status: "created",
-                database: schema.name,
-                tables: tables.map((t) => t.name),
-                tablesCount: tables.length,
-                allocatedSpace: requestedSpace || 0,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Database creation failed: " + error.message,
-            });
+    app.post("/database/create", (req, res) => {
+        const { schema, requestedSpace, allocatedPeers } = req.body;
+        if (!schema || !schema.name) {
+            return safeResponse(res, 400, { error: "Schema with name required" });
         }
+        const dbName = schema.name;
+        const dbDir = path.join(__dirname, "data", dbName);
+        if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+        // Save metadata
+        const meta = loadMeta();
+        meta[dbName] = {
+            id: schema.id || uuidv4(),
+            name: dbName,
+            tables: schema.tables || [],
+            tablesCount: (schema.tables || []).length,
+            createdAt: new Date().toISOString(),
+            requestedSpace: requestedSpace || 0,
+            usedSpace: 0,
+            allocatedPeersCount: Array.isArray(allocatedPeers) ? allocatedPeers.length : 0,
+            storageDistributionCount: 0,
+        };
+        saveMeta(meta);
+        safeResponse(res, 200, {
+            status: "created",
+            database: dbName,
+            tables: (schema.tables || []).map((t) => t.name),
+            tablesCount: (schema.tables || []).length,
+            allocatedSpace: requestedSpace || 0,
+        });
     });
 
-    // Get all records from a table
-    app.get("/database/:dbName/:tableName", async (req, res) => {
-        try {
-            const { dbName, tableName } = req.params;
-            if (!dbName || !tableName) {
-                return safeResponse(res, 400, {
-                    error: "Database name and table name are required",
-                });
-            }
-            const records = [];
-            const recordKeys = new Set();
-            const tableKey = `db/${dbName}/tables/${tableName}/records`;
-
-            const recordsPromise = new Promise((resolve) => {
-                let hasData = false;
-                gun
-                    .get(tableKey)
-                    .map()
-                    .once((data, key) => {
-                        if (
-                            data &&
-                            key &&
-                            key !== "_" &&
-                            key !== "#" &&
-                            key !== ">" &&
-                            typeof data === "object" &&
-                            !Array.isArray(data)
-                        ) {
-                            if (data.deleted === true) return;
-                            if (!recordKeys.has(key)) {
-                                recordKeys.add(key);
-                                const cleanRecord = {};
-                                Object.keys(data).forEach((prop) => {
-                                    if (prop !== "_" && prop !== "#" && prop !== ">") {
-                                        cleanRecord[prop] = data[prop];
-                                    }
-                                });
-                                if (!cleanRecord.id) cleanRecord.id = key;
-                                if (cleanRecord.id !== "_exists") {
-                                    records.push(cleanRecord);
-                                    hasData = true;
-                                }
-                            }
-                        }
-                    });
-                setTimeout(() => resolve(), 2000);
-            });
-
-            await recordsPromise;
-
-            safeResponse(res, 200, {
-                records: records,
-                count: records.length,
-                database: dbName,
-                table: tableName,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to fetch records: " + error.message,
-            });
+    // Add table to existing database
+    app.post("/database/:dbName/table", (req, res) => {
+        const { dbName } = req.params;
+        const tableData = req.body;
+        if (!tableData.name) {
+            return safeResponse(res, 400, { error: "Table name is required" });
         }
+        const meta = loadMeta();
+        if (!meta[dbName]) {
+            return safeResponse(res, 404, { error: "Database not found" });
+        }
+        if (!meta[dbName].tables) meta[dbName].tables = [];
+        meta[dbName].tables.push({
+            id: uuidv4(),
+            name: tableData.name,
+            columns: tableData.columns || [],
+            createdAt: new Date().toISOString(),
+        });
+        meta[dbName].tablesCount = meta[dbName].tables.length;
+        meta[dbName].updatedAt = new Date().toISOString();
+        saveMeta(meta);
+        safeResponse(res, 200, {
+            success: true,
+            message: `Table "${tableData.name}" added successfully`,
+            table: tableData,
+        });
     });
 
-    // List all databases
-    app.get("/databases", async (req, res) => {
-        try {
-            const databases = [];
-            const dbKeys = new Set();
-            const databasesPromise = new Promise((resolve) => {
-                gun
-                    .get(DATABASES_KEY)
-                    .map()
-                    .once(async (dbData, dbName) => {
-                        if (
-                            dbData &&
-                            dbName &&
-                            dbName !== "_" &&
-                            dbName !== "#" &&
-                            dbName !== ">"
-                        ) {
-                            if (!dbKeys.has(dbName)) {
-                                dbKeys.add(dbName);
-                                const cleanDbData = {};
-                                Object.keys(dbData).forEach((prop) => {
-                                    if (prop !== "_" && prop !== "#" && prop !== ">") {
-                                        cleanDbData[prop] = dbData[prop];
-                                    }
-                                });
-                                const tables = await retrieveArray(
-                                    gun,
-                                    `db/${dbName}/tables`,
-                                    3000
-                                );
-                                const tablesWithColumns = await Promise.all(
-                                    tables.map(async (table) => {
-                                        const tableName = table.name;
-                                        const columns = await retrieveArray(
-                                            gun,
-                                            `db/${dbName}/tables/${tableName}/columns`,
-                                            2000
-                                        );
-                                        return {
-                                            ...table,
-                                            columns: columns,
-                                            columnsCount: columns.length,
-                                        };
-                                    })
-                                );
-                                const database = {
-                                    ...cleanDbData,
-                                    name: dbName,
-                                    tables: tablesWithColumns,
-                                    tablesCount: tablesWithColumns.length,
-                                };
-                                databases.push(database);
-                            }
-                        }
-                    });
-                setTimeout(() => resolve(), 5000);
-            });
-            await databasesPromise;
-            safeResponse(res, 200, { databases: databases, count: databases.length });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to fetch databases: " + error.message,
-            });
+    // Get all tables for a specific database
+    app.get("/database/:dbName/tables", (req, res) => {
+        const { dbName } = req.params;
+        const meta = loadMeta();
+        if (!meta[dbName]) {
+            return safeResponse(res, 404, { error: "Database not found" });
         }
+        const tables = (meta[dbName].tables || []).map((table) => ({
+            ...table,
+            columnsCount: (table.columns || []).length,
+        }));
+        safeResponse(res, 200, {
+            database: dbName,
+            tables,
+            count: tables.length,
+        });
     });
 
     // Insert a record into a table
-    app.post("/database/:dbName/:tableName", async (req, res) => {
-        try {
-            const { dbName, tableName } = req.params;
-            const record = req.body;
-            if (!dbName || !tableName || !record) {
-                return safeResponse(res, 400, {
-                    error: "Database, table, and record required",
-                });
-            }
-            await gunOperation(gun, () =>
-                gun
-                    .get(`db/${dbName}/tables/${tableName}/records`)
-                    .put({ _exists: true })
-            );
-            const id = record.id || uuidv4();
-            await gunOperation(gun, () =>
-                gun.get(`db/${dbName}/tables/${tableName}/records/${id}`).put({
-                    id: null,
-                    createdAt: null,
-                    deleted: null,
-                })
-            );
-            record.id = id;
-            record.createdAt = new Date().toISOString();
-            const recordPath = `db/${dbName}/tables/${tableName}/records/${id}`;
-            await gunOperation(gun, () => gun.get(recordPath).put(record));
-            await gunOperation(gun, () =>
-                gun
-                    .get(`db/${dbName}/tables/${tableName}/records`)
-                    .get(id)
-                    .put(gun.get(recordPath))
-            );
-            safeResponse(res, 200, { success: true, record });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to insert record: " + error.message,
+    app.post("/database/:dbName/:tableName", (req, res) => {
+        const { dbName, tableName } = req.params;
+        const record = req.body;
+        if (!dbName || !tableName || !record) {
+            return safeResponse(res, 400, {
+                error: "Database, table, and record required",
             });
         }
+        const meta = loadMeta();
+        if (!meta[dbName]) {
+            return safeResponse(res, 404, { error: "Database not found" });
+        }
+        const tableExists = (meta[dbName].tables || []).some(t => t.name === tableName);
+        if (!tableExists) {
+            return safeResponse(res, 404, { error: "Table not found" });
+        }
+        const db = getNeDB(dbName);
+        record.id = record.id || uuidv4();
+        record.createdAt = new Date().toISOString();
+        record.table = tableName;
+        db.insert(record, (err, newDoc) => {
+            if (err) {
+                return safeResponse(res, 500, { error: "Failed to insert record" });
+            }
+            safeResponse(res, 200, { success: true, record: newDoc });
+        });
+    });
+
+    // Get all records from a table
+    app.get("/database/:dbName/:tableName", (req, res) => {
+        const { dbName, tableName } = req.params;
+        const db = getNeDB(dbName);
+        db.find({ table: tableName, deleted: { $ne: true } }, (err, docs) => {
+            if (err) {
+                return safeResponse(res, 500, { error: "Failed to fetch records" });
+            }
+            safeResponse(res, 200, {
+                records: docs,
+                count: docs.length,
+                database: dbName,
+                table: tableName,
+            });
+        });
     });
 
     // Update a record in a table
-    app.put("/database/:dbName/:tableName/:id", async (req, res) => {
-        try {
-            const { dbName, tableName, id } = req.params;
-            const updateData = req.body;
-            if (!dbName || !tableName || !id) {
-                return safeResponse(res, 400, {
-                    error: "Database name, table name, and record ID are required",
-                });
-            }
-            if (!updateData || typeof updateData !== "object") {
-                return safeResponse(res, 400, { error: "Update data is required" });
-            }
-            const recordKey = `db/${dbName}/tables/${tableName}/records/${id}`;
-            const existingRecord = await gunOperation(gun, () => gun.get(recordKey));
-            if (!existingRecord) {
-                return safeResponse(res, 404, { error: "Record not found" });
-            }
-            const updatedRecord = {
-                ...existingRecord,
-                ...updateData,
-                id: id,
-                updatedAt: new Date().toISOString(),
-            };
-            Object.keys(updatedRecord).forEach((k) => {
-                if (k === "_" || k === "#" || k === ">") delete updatedRecord[k];
-            });
-            await gunOperation(gun, () => gun.get(recordKey).put(updatedRecord));
-            safeResponse(res, 200, {
-                success: true,
-                message: "Record updated successfully",
-                record: updatedRecord,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to update record: " + error.message,
+    app.put("/database/:dbName/:tableName/:id", (req, res) => {
+        const { dbName, tableName, id } = req.params;
+        const updateData = req.body;
+        if (!dbName || !tableName || !id) {
+            return safeResponse(res, 400, {
+                error: "Database name, table name, and record ID are required",
             });
         }
+        const db = getNeDB(dbName);
+        updateData.updatedAt = new Date().toISOString();
+        db.update({ id, table: tableName }, { $set: updateData }, {}, (err, numReplaced) => {
+            if (err || numReplaced === 0) {
+                return safeResponse(res, 404, { error: "Record not found or update failed" });
+            }
+            db.findOne({ id, table: tableName }, (err, doc) => {
+                safeResponse(res, 200, {
+                    success: true,
+                    message: "Record updated successfully",
+                    record: doc,
+                });
+            });
+        });
     });
 
-    // Delete a table from a database
-    app.delete("/database/:dbName/table/:tableName", async (req, res) => {
-        try {
-            const { dbName, tableName } = req.params;
-            if (!dbName || !tableName) {
-                return safeResponse(res, 400, {
-                    error: "Database and table name required",
-                });
+    // Delete a record in a table (soft delete)
+    app.delete("/database/:dbName/:tableName/:id", (req, res) => {
+        const { dbName, tableName, id } = req.params;
+        const db = getNeDB(dbName);
+        db.update({ id, table: tableName }, { $set: { deleted: true, deletedAt: new Date().toISOString() } }, {}, (err, numReplaced) => {
+            if (err || numReplaced === 0) {
+                return safeResponse(res, 404, { error: "Record not found or delete failed" });
             }
-            await gunOperation(gun, () =>
-                gun
-                    .get(`db/${dbName}/tables/${tableName}`)
-                    .put({ deleted: true, deletedAt: new Date().toISOString() })
-            );
-            safeResponse(res, 200, {
-                success: true,
-                message: `Table ${tableName} marked as deleted in ${dbName}`,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to delete table: " + error.message,
-            });
-        }
-    });
-
-    // Delete a database
-    app.delete("/database/:dbName", async (req, res) => {
-        try {
-            const { dbName } = req.params;
-            const dbMeta = await gunOperation(gun, () =>
-                gun.get(`${DATABASES_KEY}/${dbName}`)
-            );
-            if (!dbMeta || typeof dbMeta !== "object") {
-                return safeResponse(res, 404, {
-                    error: `Database ${dbName} not found`,
-                });
-            }
-            await recursiveDelete(gun, `db/${dbName}`, DATABASES_KEY);
-            await gunOperation(gun, () =>
-                gun.get(`${DATABASES_KEY}/${dbName}`).put({ _deleted: true })
-            );
-            await new Promise((r) => setTimeout(r, 200));
-            await gunOperation(gun, () =>
-                gun.get(`${DATABASES_KEY}/${dbName}`).put(null)
-            );
-            await gunOperation(gun, () =>
-                gun.get(DATABASES_KEY).get(dbName).put(null)
-            );
-            let check = await gunOperation(gun, () =>
-                gun.get(`${DATABASES_KEY}/${dbName}`)
-            );
-            if (check && typeof check === "object") {
-                await safeDelete(gun.get(`${DATABASES_KEY}/${dbName}`));
-                await new Promise((r) => setTimeout(r, 200));
-            }
-            safeResponse(res, 200, {
-                success: true,
-                message: `Database ${dbName} deleted (best effort)`,
-            });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to delete database: " + error.message,
-            });
-        }
-    });
-
-    // Delete a record in a table
-    app.delete("/database/:dbName/:tableName/:id", async (req, res) => {
-        try {
-            const { dbName, tableName, id } = req.params;
-            if (!dbName || !tableName || !id) {
-                return safeResponse(res, 400, {
-                    error: "Database name, table name, and record ID are required",
-                });
-            }
-            const recordKey = `db/${dbName}/tables/${tableName}/records/${id}`;
-            await gunOperation(gun, () =>
-                gun
-                    .get(recordKey)
-                    .put({ deleted: true, deletedAt: new Date().toISOString() })
-            );
             safeResponse(res, 200, {
                 success: true,
                 message: "Record marked as deleted",
                 id: id,
             });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to delete record: " + error.message,
+        });
+    });
+
+    // Delete a table from a database (removes all records and table metadata)
+    app.delete("/database/:dbName/table/:tableName", (req, res) => {
+        const { dbName, tableName } = req.params;
+        const db = getNeDB(dbName);
+        db.update({ table: tableName }, { $set: { deleted: true, deletedAt: new Date().toISOString() } }, { multi: true }, (err) => {
+            const meta = loadMeta();
+            if (meta[dbName] && meta[dbName].tables) {
+                meta[dbName].tables = meta[dbName].tables.filter((t) => t.name !== tableName);
+                meta[dbName].tablesCount = meta[dbName].tables.length;
+                meta[dbName].updatedAt = new Date().toISOString();
+                saveMeta(meta);
+            }
+            safeResponse(res, 200, {
+                success: true,
+                message: `Table ${tableName} marked as deleted in ${dbName}`,
             });
-        }
+        });
+    });
+
+    // Delete a database (removes all records and metadata)
+    app.delete("/database/:dbName", (req, res) => {
+        const { dbName } = req.params;
+        const dbDir = path.join(__dirname, "data", dbName);
+        const dbFile = path.join(dbDir, "nedb.db");
+        if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);
+        if (fs.existsSync(dbDir)) fs.rmdirSync(dbDir, { recursive: true });
+        const meta = loadMeta();
+        delete meta[dbName];
+        saveMeta(meta);
+        safeResponse(res, 200, {
+            success: true,
+            message: `Database ${dbName} deleted`,
+        });
     });
 
     // Rename a table in a database
-    app.put("/database/:dbName/table/:tableName/rename", async (req, res) => {
-        try {
-            const { dbName, tableName } = req.params;
-            const { newName } = req.body;
-            if (!dbName || !tableName || !newName) {
-                return safeResponse(res, 400, {
-                    error: "Database, old table name, and new name required",
-                });
+    app.put("/database/:dbName/table/:tableName/rename", (req, res) => {
+        const { dbName, tableName } = req.params;
+        const { newName } = req.body;
+        if (!newName) {
+            return safeResponse(res, 400, { error: "New table name required" });
+        }
+        const db = getNeDB(dbName);
+        db.update({ table: tableName }, { $set: { table: newName } }, { multi: true }, (err) => {
+            const meta = loadMeta();
+            if (meta[dbName] && meta[dbName].tables) {
+                const table = meta[dbName].tables.find((t) => t.name === tableName);
+                if (table) table.name = newName;
+                meta[dbName].updatedAt = new Date().toISOString();
+                saveMeta(meta);
             }
-            const oldTablePath = `db/${dbName}/tables/${tableName}`;
-            const oldTableData = await gunOperation(gun, () => gun.get(oldTablePath));
-            if (!oldTableData) {
-                return safeResponse(res, 404, { error: "Table not found" });
-            }
-            const newTablePath = `db/${dbName}/tables/${newName}`;
-            const newTableData = {
-                ...oldTableData,
-                name: newName,
-                updatedAt: new Date().toISOString(),
-            };
-            await gunOperation(gun, () => gun.get(newTablePath).put(newTableData));
-            const columns = await retrieveArray(gun, `${oldTablePath}/columns`, 3000);
-            for (const column of columns) {
-                const colId = column.id || column.name;
-                await gunOperation(gun, () =>
-                    gun.get(`${newTablePath}/columns/${colId}`).put(column)
-                );
-                await gunOperation(gun, () =>
-                    gun
-                        .get(`${newTablePath}/columns`)
-                        .get(colId)
-                        .put(gun.get(`${newTablePath}/columns/${colId}`))
-                );
-            }
-            const records = await retrieveArray(gun, `${oldTablePath}/records`, 5000);
-            for (const record of records) {
-                const recId = record.id;
-                await gunOperation(gun, () =>
-                    gun.get(`${newTablePath}/records/${recId}`).put(record)
-                );
-            }
-            await gunOperation(gun, () =>
-                gun.get(`db/${dbName}/tables`).get(newName).put(gun.get(newTablePath))
-            );
-            await gunOperation(gun, () => gun.get(oldTablePath).put(null));
-            await gunOperation(gun, () =>
-                gun.get(`db/${dbName}/tables`).get(tableName).put(null)
-            );
             safeResponse(res, 200, {
                 success: true,
                 message: `Table renamed from ${tableName} to ${newName}`,
             });
-        } catch (error) {
-            safeResponse(res, 500, {
-                error: "Failed to rename table: " + error.message,
-            });
-        }
+        });
     });
 }
 
