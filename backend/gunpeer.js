@@ -211,6 +211,19 @@ app.get('/peers', async (req, res) => {
   }
 });
 
+// Relay database operation to target peer
+app.post('/relay-db-op', (req, res) => {
+  const { targetPeer, operation } = req.body;
+  if (!targetPeer || !operation) {
+    return safeResponse(res, 400, { error: 'targetPeer and operation required' });
+  }
+  if (!peerSockets[targetPeer]) {
+    return safeResponse(res, 404, { error: 'Target peer not connected' });
+  }
+  peerSockets[targetPeer].emit('db-op', operation);
+  safeResponse(res, 200, { status: 'relayed' });
+});
+
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);

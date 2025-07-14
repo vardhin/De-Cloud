@@ -2,20 +2,16 @@ const Gun = require('gun');
 const express = require('express');
 const cors = require('cors');
 const si = require('systeminformation');
-const WebSocket = require('ws');
 const DockerUtility = require('./docker_utility');
 const http = require('http');
 const { Server } = require('socket.io');
-const { v4: uuidv4 } = require('uuid');
-const crypto = require('crypto');
-const ioClient = require('socket.io-client');
-const os = require('os');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const registerProxyApi = require('./proxy-api');
-
-
-// Import DB API handler functions
 const { registerDatabaseApi, createDatabase, insertRecord, updateRecord, deleteRecord, addTable, deleteTable, renameTable } = require('./database-api');
+const { getSystemResources } = require('./resourceUtil');
+const { setGun, getPeerConfig, setPeerConfig, savePeerConfig, resetPeerConfig, PEER_REG_KEY } = require('./peerConfigUtil');
+const { connectSuperpeerSocket } = require('./superpeerSocketUtil');
+const { createContainerManager } = require('./containerManager');
 
 const app = express();
 app.use(cors());
@@ -23,18 +19,6 @@ app.use(express.json());
 
 const SUPER_PEER_URL = 'https://test.vardhin.tech/gun';
 const SUPER_PEER_API_URL = SUPER_PEER_URL.replace(/\/gun$/, '');
-
-
-const containers = {};
-const containerResources = {};
-const containerSecrets = {};
-const dockerUtil = new DockerUtility();
-
-let availableRam = null;
-let availableStorage = null;
-let totalRam = null;
-let totalStorage = null;
-
 
 // Connect to the super peer (relay)
 const gun = Gun({
@@ -282,90 +266,15 @@ app.post('/network/check-allocation', async (req, res) => {
   }
 });
 
-async function isSuperPeerAvailable() {
-  try {
-    console.log('Checking superpeer availability at:', SUPER_PEER_API_URL);
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-    
-    const resp = await fetch(`${SUPER_PEER_API_URL}/health`, {
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!resp.ok) {
-      console.log('Superpeer health check failed with status:', resp.status);
-      return false;
-    }
-    
-    const data = await resp.json();
-    console.log('Superpeer health check response:', data);
-    
-    return data.status === 'healthy';
-  } catch (error) {
-    console.log('Superpeer availability check failed:', error.message);
-    return false;
-  }
-}
-
-async function updateAvailableResources() {
-    try {
-        const mem = await si.mem();
-        const disks = await si.fsSize();
-        const disk = disks.reduce((a, b) => (a.size > b.size ? a : b), { size: 0, available: 0 });
-        totalRam = mem.total;
-        totalStorage = disk.size || 0;
-
-        let usedRam = 0;
-        let usedStorage = 0;
-        for (const res of Object.values(containerResources)) {
-            usedRam += res.ram || 0;
-            usedStorage += res.storage || 0;
-        }
-        availableRam = Math.max(0, mem.available - usedRam);
-        availableStorage = Math.max(0, (disk.available || 0) - usedStorage);
-
-        try {
-            await fetch(`${SUPER_PEER_API_URL}/register`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: peerConfig.name || 'unnamed-peer',
-                    totalRam,
-                    availableRam,
-                    totalStorage,
-                    availableStorage,
-                    gpu: (await si.graphics()).controllers[0]?.model || 'none'
-                })
-            });
-        } catch (e) {
-            console.warn('Superpeer not reachable:', e.message);
-        }
-    } catch (e) {
-        console.error('Resource update failed:', e.message);
-    }
-}
-
 app.get('/resources', async (req, res) => {
-    const mem = await si.mem();
-    const disks = await si.fsSize();
-    const disk = disks.reduce((a, b) => (a.size > b.size ? a : b), { size: 0 });
-    const gpu = (await si.graphics()).controllers[0] || {};
-    const cpu = await si.cpu();
-    res.json({
-        ram: mem.total,
-        freeRam: mem.available,
-        storage: disk.size || 0,
-        freeStorage: disk.available || 0,
-        gpu: gpu.model || 'none',
-        cpuCores: cpu.cores,
-        cpuThreads: cpu.processors || cpu.physicalCores || cpu.cores
-    });
+    try {
+        const resources = await getSystemResources(
+            containerManager ? containerManager.containerResources : {}
+        );
+        res.json(resources);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 let peerConfig = {};
@@ -377,183 +286,36 @@ gun.get(PEER_REG_KEY).on(data => {
   if (data) {
     peerConfig = data;
     console.log('peerConfig loaded from Gun:', peerConfig);
+    // (Re)create containerManager when peerConfig is loaded or changes
+    containerManager = createContainerManager(dockerUtil, gun, peerConfig, PEER_REG_KEY);
   }
 });
 
+// After Gun instance is created:
+setGun(gun);
+
 // Endpoint to get registration info
 app.get('/registration', (req, res) => {
-  gun.get(PEER_REG_KEY).once(data => {
-    res.json(data || {});
-  });
+  res.json(getPeerConfig() || {});
 });
 
 // Save config locally (update registration info in Gun.js)
 app.post('/save_config', express.json(), async (req, res) => {
-    const data = req.body;
-    if (!data.name) return res.status(400).json({ error: 'name required' });
-    gun.get(PEER_REG_KEY).put({ ...data, registered: false, timestamp: Date.now() });
-    peerConfig = { ...data, registered: false, timestamp: Date.now() };
-    res.json({ status: 'saved' });
+  const data = req.body;
+  if (!data.name) return res.status(400).json({ error: 'name required' });
+  savePeerConfig(data);
+  res.json({ status: 'saved' });
 });
 
 // Reset config to last saved or default
 app.post('/reset_config', async (req, res) => {
-    gun.get(PEER_REG_KEY).once(data => {
-        if (data) {
-            peerConfig = data;
-            res.json({ status: 'reset', config: data });
-        } else {
-            // Optionally, set to some defaults
-            peerConfig = {};
-            res.json({ status: 'reset', config: {} });
-        }
-    });
-});
-
-// Register to superpeer (send current config to superpeer)
-app.post('/register_superpeer', express.json(), async (req, res) => {
-    const data = req.body;
-    if (!data.name) return res.status(400).json({ error: 'name required' });
-    try {
-        // Remove Gun metadata fields
-        const cleanPayload = { ...peerConfig, ...data, lastSeen: Date.now() };
-        delete cleanPayload._;
-        delete cleanPayload['#'];
-        delete cleanPayload['>'];
-
-        console.log('[CLIENT] Attempting to register with superpeer:', cleanPayload);
-        const response = await fetch(`${SUPER_PEER_API_URL}/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(cleanPayload)
-        });
-        const respJson = await response.json();
-        console.log('[CLIENT] Superpeer /register response:', respJson);
-
-        // Only put clean data into Gun
-        gun.get(PEER_REG_KEY).put({ ...cleanPayload, registered: true, timestamp: Date.now() });
-        peerConfig = { ...cleanPayload, registered: true, timestamp: Date.now() };
-        console.log('peerConfig after register_superpeer:', peerConfig);
-        res.json({ status: 'registered' });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Deregister from superpeer
-app.post('/deregister_superpeer', async (req, res) => {
-    if (!peerConfig.name) return res.status(400).json({ error: 'not registered' });
-    try {
-        await fetch(`${SUPER_PEER_API_URL}/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: peerConfig.name, deregister: true })
-        });
-        gun.get(PEER_REG_KEY).put({ ...peerConfig, registered: false });
-        peerConfig = { ...peerConfig, registered: false };
-        res.json({ status: 'deregistered' });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+  resetPeerConfig(config => {
+    res.json({ status: 'reset', config: config || {} });
+  });
 });
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
-
-// Deploy a new container with config, return containerId
-app.post('/container/deploy', express.json(), async (req, res) => {
-  try {
-    const config = req.body || {};
-    // Parse resource limits from config
-    const ram = config.Memory || 1024 * 1024 * 1024 * 8; // default 8GB
-    const cpu = config.NanoCpus || config.CpuShares || null;
-    const gpu = config.DeviceRequests ? 'gpu' : null;
-    const storage = config.Storage || 0; // You may want to handle storage limits more precisely
-
-    // Check if enough resources are available
-    await updateAvailableResources();
-    if (availableRam !== null && ram > availableRam) {
-      return res.status(400).json({ error: 'Not enough RAM available' });
-    }
-
-    // CPU check (assume total CPU = os.cpus().length, NanoCpus in Docker is in units of 10^9)
-    if (cpu) {
-      const totalCpu = os.cpus().length * 1e9; // total NanoCpus
-      let usedCpu = 0;
-      for (const res of Object.values(containerResources)) {
-        usedCpu += res.cpu || 0;
-      }
-      const availableCpu = totalCpu - usedCpu;
-      if (cpu > availableCpu) {
-        return res.status(400).json({ error: 'Not enough CPU available' });
-      }
-    }
-
-    // GPU check (very basic: only allow one GPU container at a time if only one GPU)
-    if (gpu) {
-      const graphics = await si.graphics();
-      const availableGpus = graphics.controllers.length;
-      let usedGpus = 0;
-      for (const res of Object.values(containerResources)) {
-        if (res.gpu) usedGpus += 1;
-      }
-      if (usedGpus >= availableGpus) {
-        return res.status(400).json({ error: 'No GPU available' });
-      }
-    }
-
-    const container = await dockerUtil.deployContainer(config);
-    const containerId = uuidv4();
-    containers[containerId] = container;
-    containerResources[containerId] = { ram, cpu, gpu, storage };
-    const secretKey = crypto.randomBytes(32).toString('hex');
-    containerSecrets[containerId] = secretKey;
-
-    // Persist to Gun.js
-    gun.get(`peer/${peerConfig.name}/containers`).get(containerId).put({
-      resources: { ram, cpu, gpu, storage },
-      secretKey
-    });
-
-    await updateAvailableResources();
-    res.json({ status: 'Container deployed', containerId, secretKey });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Run a command in a specific container
-app.post('/container/exec', express.json(), async (req, res) => {
-    const { containerId, cmd } = req.body;
-    if (!containerId || !cmd) return res.status(400).json({ error: 'containerId and cmd required' });
-    const container = containers[containerId];
-    if (!container) return res.status(404).json({ error: 'Container not found' });
-    try {
-        const output = await dockerUtil.runCommand(cmd, container);
-        res.json({ output });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Close and remove a specific container
-app.post('/container/close', express.json(), async (req, res) => {
-    const { containerId } = req.body;
-    if (!containerId) return res.status(400).json({ error: 'containerId required' });
-    const container = containers[containerId];
-    if (!container) return res.status(404).json({ error: 'Container not found' });
-    try {
-        await dockerUtil.closeContainer(container);
-        delete containers[containerId];
-        delete containerResources[containerId];
-        delete containerSecrets[containerId];
-        gun.get(PEER_REG_KEY).get(containerId).put(null); // Remove from Gun.js
-        await updateAvailableResources(); // Add resources back after close
-        res.json({ status: 'Container closed' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 
 // --- Interactive shell via Socket.IO with multiplexing ---
 io.on('connection', async (socket) => {
@@ -589,230 +351,6 @@ io.on('connection', async (socket) => {
 
 // --- Tunnel message handler with sessionId/containerId ---
 let superpeerSocket = null;
-let superpeerRegistered = false; // Track registration
-
-function connectSuperpeerSocket() {
-  if (superpeerSocket && superpeerSocket.connected) return superpeerSocket;
-  const superpeerSocketUrl = SUPER_PEER_URL.replace(/^http/, 'ws').replace(/\/gun$/, '');
-  superpeerSocket = ioClient(superpeerSocketUrl);
-
-  superpeerSocket.on('connect', () => {
-    if (!peerConfig.registered) {
-      console.warn('Connected to superpeer socket, but peer is not registered. Please register to superpeer first.');
-      return;
-    }
-    // Register this socket with the superpeer
-    superpeerSocket.emit('register', { name: peerConfig.name });
-    console.log('Socket.IO connection to superpeer established and registered as', peerConfig.name);
-  });
-
-  superpeerSocket.on('connect_error', (err) => {
-    console.error('Error connecting to superpeer socket:', err.message);
-  });
-
-  superpeerSocket.on('disconnect', () => {
-    console.warn('Disconnected from superpeer socket.');
-  });
-
-  // Move this handler INSIDE the function
-  superpeerSocket.on('tunnel', async (data) => {
-    console.log('[TUNNEL] Received tunnel message:', data); // <-- Add this line
-    try {
-      const { from, payload, sessionId, containerId } = data;
-
-      // Handle request_container
-      if (payload && payload.action === 'request_container') {
-        const { resources } = payload;
-        const config = {
-          Memory: resources.ram,
-          NanoCpus: resources.cpu,
-          DeviceRequests: resources.gpu ? [{ Count: 1, Capabilities: [['gpu']] }] : undefined
-        };
-        try {
-          const container = await dockerUtil.deployContainer(config);
-          const newContainerId = uuidv4();
-          const secretKey = crypto.randomBytes(32).toString('hex');
-          containers[newContainerId] = container;
-          containerResources[newContainerId] = resources;
-          containerSecrets[newContainerId] = secretKey;
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            payload: {
-              action: 'request_container_result',
-              containerId: newContainerId,
-              userId: peerConfig.name, // Replace PEER_NAME with peerConfig.name
-              secretKey
-            }
-          });
-        } catch (err) {
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            payload: {
-              action: 'request_container_result',
-              error: err.message
-            }
-          });
-        }
-      }
-
-      // For docker_exec, add secretKey check:
-      if (payload && payload.action === 'docker_exec') {
-        const id = sessionId || containerId;
-        const container = containers[id];
-        if (!container) {
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            sessionId: id,
-            payload: { action: 'docker_exec_result', error: 'Container/session not found' }
-          });
-          return;
-        }
-        if (payload.secretKey !== containerSecrets[id]) {
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            sessionId: id,
-            payload: { action: 'docker_exec_result', error: 'Invalid secretKey' }
-          });
-          return;
-        }
-        try {
-          const output = await dockerUtil.runCommand(payload.cmd, container);
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            sessionId: id,
-            payload: { action: 'docker_exec_result', output }
-          });
-        } catch (err) {
-          superpeerSocket.emit('tunnel', {
-            type: 'tunnel',
-            target: from,
-            sessionId: id,
-            payload: { action: 'docker_exec_result', error: err.message }
-          });
-        }
-      }
-      // Add more tunnel actions as needed
-    } catch (e) {
-      console.error('Tunnel message error:', e.message);
-    }
-  });
-
-  return superpeerSocket;
-}
-
-// Add an endpoint to initiate Docker tunnel connection
-app.post('/docker/tunnel/connect', (req, res) => {
-  const socket = connectSuperpeerSocket();
-  if (socket.connected) {
-    res.json({ status: 'connected' });
-  } else {
-    socket.on('connect', () => res.json({ status: 'connected' }));
-    socket.on('connect_error', (err) => res.status(500).json({ error: err.message }));
-  }
-});
-
-// Connect to another peer via superpeer (request_container)
-app.post('/connect/:peer', express.json(), async (req, res) => {
-    console.log('[CONNECT] Received connection request for peer:', req.params.peer);
-    console.log('[CONNECT] Request body:', req.body);
-    console.log('[CONNECT] Peer config:', peerConfig);
-    
-    if (!peerConfig.registered) {
-        console.log('[CONNECT] Peer is not registered');
-        return res.status(400).json({ error: 'Peer is not registered. Please register to superpeer first.' });
-    }
-
-    const targetPeer = req.params.peer;
-    const { ram, cpu, gpu } = req.body;
-    
-    // Validate input
-    if (!targetPeer) {
-        return res.status(400).json({ error: 'Target peer name is required' });
-    }
-    
-    if (!ram || ram < 1024 * 1024) {
-        return res.status(400).json({ error: 'RAM must be at least 1MB' });
-    }
-    
-    console.log('[CONNECT] Connecting to superpeer socket...');
-    const socket = connectSuperpeerSocket();
-
-    function sendTunnelRequest() {
-        let responded = false;
-        console.log('[CONNECT] Sending tunnel request to:', targetPeer);
-        
-        // Listen for response
-        function onTunnelResponse(data) {
-            console.log('[CONNECT] Received tunnel response:', data);
-            
-            if (
-                data.payload &&
-                data.payload.action === 'request_container_result' &&
-                data.payload.userId === targetPeer
-            ) {
-                socket.off('tunnel', onTunnelResponse);
-                clearTimeout(timeout);
-                responded = true;
-                
-                if (data.payload.error) {
-                    console.log('[CONNECT] Error from peer:', data.payload.error);
-                    res.status(500).json({ error: data.payload.error });
-                } else {
-                    console.log('[CONNECT] Success:', data.payload);
-                    res.json({
-                        containerId: data.payload.containerId,
-                        secretKey: data.payload.secretKey,
-                        userId: data.payload.userId
-                    });
-                }
-            }
-        }
-        
-        socket.on('tunnel', onTunnelResponse);
-
-        // Send tunnel request to target peer via superpeer
-        const tunnelMessage = {
-            target: targetPeer,
-            payload: {
-                action: 'request_container',
-                resources: { ram, cpu, gpu }
-            }
-        };
-        
-        console.log('[CONNECT] Emitting tunnel message:', tunnelMessage);
-        socket.emit('tunnel', tunnelMessage);
-
-        // Timeout in 15s
-        const timeout = setTimeout(() => {
-            socket.off('tunnel', onTunnelResponse);
-            if (!responded) {
-                console.log('[CONNECT] Timeout waiting for peer response');
-                res.status(504).json({ error: 'Timeout waiting for peer response. The target peer may be offline or unreachable.' });
-            }
-        }, 15000);
-    }
-
-    if (socket.connected) {
-        console.log('[CONNECT] Socket already connected, sending request');
-        sendTunnelRequest();
-    } else {
-        console.log('[CONNECT] Socket not connected, waiting for connection...');
-        socket.once('connect', () => {
-            console.log('[CONNECT] Socket connected, sending request');
-            sendTunnelRequest();
-        });
-        
-        socket.once('connect_error', (err) => {
-            console.log('[CONNECT] Socket connection error:', err);
-            res.status(500).json({ error: 'Failed to connect to superpeer: ' + err.message });
-        });
-    }
-});
 
 // Periodically update registration to keep peer alive in superpeer list
 setInterval(async () => {
@@ -832,7 +370,107 @@ setInterval(async () => {
     }
 }, 60 * 1000); // every 60 seconds
 
-// --- Start HTTP and Socket.IO server ---
+
+
+app.post('/db-op/peer/:peerName', async (req, res) => {
+  const { peerName } = req.params;
+  const operation = req.body;
+  if (!peerName || !operation) {
+    return res.status(400).json({ error: 'peerName and operation required' });
+  }
+  try {
+    // Relay via superpeer
+    const response = await fetch(`${SUPER_PEER_API_URL}/relay-db-op`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetPeer: peerName, operation })
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+superpeerSocket = connectSuperpeerSocket({
+  SUPER_PEER_URL,
+  peerConfig: getPeerConfig(),
+  onTunnel: (data) => {
+    // Handle tunnel messages here, or delegate to a handler function
+  }
+});
+
+if (superpeerSocket) {
+  superpeerSocket.on('db-op', async (operation) => {
+    try {
+      await handleDbOperation(operation);
+      console.log('[DB-OP] Operation handled:', operation);
+    } catch (e) {
+      console.error('[DB-OP] Error handling operation:', e);
+    }
+  });
+}
+
+async function handleDbOperation(op) {
+  // Use your existing logic from listenForDbOps, e.g.:
+  if (op.type === "create") await createDatabase(op);
+  else if (op.type === "insert") await insertRecord(op);
+  else if (op.type === "update") await updateRecord(op);
+  else if (op.type === "delete") await deleteRecord(op);
+  else if (op.type === "add_table") await addTable(op);
+  else if (op.type === "delete_table") await deleteTable(op);
+  else if (op.type === "rename_table") await renameTable(op);
+  // Add more as needed
+}
+
+// Example: Deploy container endpoint (add if needed)
+app.post('/container/deploy', express.json(), async (req, res) => {
+  try {
+    const { containerId, secretKey } = await containerManager.deployContainer(req.body || {});
+    res.json({ status: 'Container deployed', containerId, secretKey });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Example: Exec in container endpoint (add if needed)
+app.post('/container/exec', express.json(), async (req, res) => {
+  const { containerId, cmd } = req.body;
+  if (!containerId || !cmd) return res.status(400).json({ error: 'containerId and cmd required' });
+  try {
+    const output = await containerManager.execInContainer(containerId, cmd);
+    res.json({ output });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Example: Close container endpoint (add if needed)
+app.post('/container/close', express.json(), async (req, res) => {
+  const { containerId } = req.body;
+  if (!containerId) return res.status(400).json({ error: 'containerId required' });
+  try {
+    await containerManager.closeContainer(containerId);
+    res.json({ status: 'Container closed' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Example: List containers
+app.get('/containers', (req, res) => {
+  res.json({ containers: containerManager.listContainers() });
+});
+
+// Example: Get container details
+app.get('/container/:id', (req, res) => {
+  const details = containerManager.getContainerDetails(req.params.id);
+  if (!details) return res.status(404).json({ error: 'Container not found' });
+  res.json(details);
+});
+
+
 const port = 8766;
 server.listen(port, () => {
   console.log(`Gun.js Normal Peer (with Docker) running on port ${port}`);
@@ -850,213 +488,4 @@ server.listen(port, () => {
   console.log('- POST /network/check-allocation - Check if resources can be allocated');
 });
 
-// Get superpeer connection status
-app.get('/superpeer-status', async (req, res) => {
-  try {
-    // Check if superpeer is reachable
-    const isAvailable = await isSuperPeerAvailable();
-    
-    if (!isAvailable) {
-      return res.json({
-        connected: false,
-        superPeerUrl: SUPER_PEER_URL,
-        error: 'Superpeer not reachable'
-      });
-    }
-
-    // Get superpeer health
-    const healthResponse = await fetch(`${SUPER_PEER_API_URL}/health`);
-    const healthData = await healthResponse.json();
-
-    // Check if this peer is registered
-    const isRegistered = peerConfig && peerConfig.registered;
-    
-    res.json({
-      connected: true,
-      superPeerUrl: SUPER_PEER_URL,
-      superPeerHealth: healthData,
-      peerRegistered: isRegistered,
-      peerName: peerConfig.name || 'unnamed-peer',
-      lastHealthCheck: Date.now()
-    });
-  } catch (error) {
-    res.json({
-      connected: false,
-      superPeerUrl: SUPER_PEER_URL,
-      error: error.message
-    });
-  }
-});
-
-// Register peer locally (different from superpeer registration)
-app.post('/register', async (req, res) => {
-  try {
-    const data = req.body;
-    if (!data.name) {
-      return res.status(400).json({ error: 'Name is required' });
-    }
-    
-    // Save to local Gun.js storage
-    gun.get(PEER_REG_KEY).put({
-      ...data,
-      registered: true,
-      timestamp: Date.now()
-    });
-    
-    peerConfig = {
-      ...data,
-      registered: true,
-      timestamp: Date.now()
-    };
-    
-    res.json({ status: 'registered' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Deregister peer locally
-app.post('/deregister', async (req, res) => {
-  try {
-    if (peerConfig.name) {
-      gun.get(PEER_REG_KEY).put({
-        ...peerConfig,
-        registered: false,
-        timestamp: Date.now()
-      });
-      
-      peerConfig = {
-        ...peerConfig,
-        registered: false,
-        timestamp: Date.now()
-      };
-    }
-    
-    res.json({ status: 'deregistered' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get current peer configuration
-app.get('/config', (req, res) => {
-  res.json(peerConfig || {});
-});
-
-// Update peer configuration
-app.post('/config', async (req, res) => {
-  try {
-    const data = req.body;
-    peerConfig = { ...peerConfig, ...data, timestamp: Date.now() };
-    
-    gun.get(PEER_REG_KEY).put(peerConfig);
-    
-    res.json({ status: 'updated', config: peerConfig });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get container list
-app.get('/containers', (req, res) => {
-  const containerList = Object.keys(containers).map(id => ({
-    id,
-    resources: containerResources[id],
-    hasSecret: !!containerSecrets[id]
-  }));
-  
-  res.json({ containers: containerList });
-});
-
-// Get container details
-app.get('/container/:id', (req, res) => {
-  const { id } = req.params;
-  const container = containers[id];
-  
-  if (!container) {
-    return res.status(404).json({ error: 'Container not found' });
-  }
-  
-  res.json({
-    id,
-    resources: containerResources[id],
-    hasSecret: !!containerSecrets[id],
-    status: 'running' // You might want to check actual container status
-  });
-});
-
-// Test connection to superpeer
-app.get('/test-superpeer', async (req, res) => {
-  try {
-    const isAvailable = await isSuperPeerAvailable();
-    
-    if (!isAvailable) {
-      return res.status(503).json({ 
-        error: 'Superpeer not reachable',
-        url: SUPER_PEER_URL 
-      });
-    }
-    
-    // Test actual API call
-    const response = await fetch(`${SUPER_PEER_API_URL}/health`);
-    const data = await response.json();
-    
-    res.json({
-      status: 'success',
-      superpeerUrl: SUPER_PEER_URL,
-      superpeerHealth: data,
-      message: 'Superpeer connection test successful'
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Superpeer connection test failed',
-      message: error.message,
-      url: SUPER_PEER_URL
-    });
-  }
-});
-
-// Helper: Listen for DB ops via Gun.js and call local DB API handlers
-function listenForDbOps() {
-    const peerName = peerConfig.name || 'unnamed-peer';
-    gun.get(`db-op/${peerName}`).map().on(async (op) => {
-        if (!op || !op.type) return;
-        console.log(`[DB-OP] Received operation:`, op);
-
-        try {
-            if (op.type === "create") {
-                // { schema, requestedSpace, allocatedPeers }
-                await createDatabase(op);
-                console.log(`[DB-OP] Database created: ${op.schema && op.schema.name}`);
-            } else if (op.type === "insert") {
-                // { dbName, tableName, record }
-                await insertRecord(op);
-                console.log(`[DB-OP] Record inserted into ${op.dbName}.${op.tableName}`);
-            } else if (op.type === "update") {
-                // { dbName, tableName, id, updateData }
-                await updateRecord(op);
-                console.log(`[DB-OP] Record updated in ${op.dbName}.${op.tableName}`);
-            } else if (op.type === "delete") {
-                // { dbName, tableName, id }
-                await deleteRecord(op);
-                console.log(`[DB-OP] Record deleted in ${op.dbName}.${op.tableName}`);
-            } else if (op.type === "add_table") {
-                // { dbName, tableData }
-                await addTable(op);
-                console.log(`[DB-OP] Table added in ${op.dbName}`);
-            } else if (op.type === "delete_table") {
-                // { dbName, tableName }
-                await deleteTable(op);
-                console.log(`[DB-OP] Table deleted in ${op.dbName}`);
-            } else if (op.type === "rename_table") {
-                // { dbName, tableName, newName }
-                await renameTable(op);
-                console.log(`[DB-OP] Table renamed in ${op.dbName}`);
-            }
-            // Add more as needed
-        } catch (e) {
-            console.error('[DB-OP] Handler error:', e);
-        }
-    });
-}
 module.exports = { app, gun };
